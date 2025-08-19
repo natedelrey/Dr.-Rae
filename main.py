@@ -244,10 +244,15 @@ async def meme(interaction: discord.Interaction):
             print(f"Meme command error: {e}")
 
 # --- Weekly Task Checking ---
-@tasks.loop(hours=24)
+# The loop runs daily at 04:00 UTC. The reset logic only executes if it's a Sunday.
+# 04:00 UTC is:
+# - 12:00 AM EDT (Eastern Daylight Time)
+# - 11:00 PM CDT (Central Daylight Time) on Saturday
+# - 09:00 PM PDT (Pacific Daylight Time) on Saturday
+@tasks.loop(time=datetime.time(hour=4, minute=0, tzinfo=datetime.timezone.utc))
 async def check_weekly_tasks():
-    now_utc = datetime.datetime.now(datetime.timezone.utc)
-    if now_utc.weekday() == 5 and now_utc.hour >= 23:
+    # Check if today is Sunday (weekday() == 6)
+    if datetime.datetime.now(datetime.timezone.utc).weekday() == 6:
         announcement_channel = bot.get_channel(ANNOUNCEMENT_CHANNEL_ID)
         if not announcement_channel:
             print("Weekly check failed: Announcement channel not found.")
@@ -277,7 +282,7 @@ async def check_weekly_tasks():
                  summary_message += "**No tasks were logged this week.**\n\n"
 
             summary_message += "Task counts have now been reset for the new week."
-            report_embed = discord.Embed(title="Weekly Task Summary", description=summary_message, color=discord.Color.gold(), timestamp=now_utc)
+            report_embed = discord.Embed(title="Weekly Task Summary", description=summary_message, color=discord.Color.gold(), timestamp=datetime.datetime.now(datetime.timezone.utc))
             await announcement_channel.send(embed=report_embed)
 
             # Reset tasks for the new week
