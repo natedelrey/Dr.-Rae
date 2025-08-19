@@ -27,7 +27,8 @@ intents.members = True
 
 class MD_BOT(commands.Bot):
     def __init__(self):
-        super().__init__(command_prefix='/', intents=intents)
+        # Using a prefix that won't conflict with slash commands
+        super().__init__(command_prefix='!', intents=intents)
         self.db_pool = None
 
     async def setup_hook(self):
