@@ -224,6 +224,41 @@ async def removelastlog_error(interaction: discord.Interaction, error: discord.a
         await interaction.response.send_message("An error occurred.", ephemeral=True)
         print(error)
 
+# DM Command
+@bot.tree.command(name="dm", description="Sends a direct message to a member.")
+@discord.app_commands.checks.has_role(MANAGEMENT_ROLE_ID)
+async def dm(interaction: discord.Interaction, member: discord.Member, title: str, message: str):
+    """Sends a cute, embedded direct message to a member."""
+    if member.bot:
+        await interaction.response.send_message("You can't send messages to bots!", ephemeral=True)
+        return
+
+    embed = discord.Embed(
+        title=f"💌 {title}",
+        description=message,
+        color=discord.Color.magenta(), # A cute color!
+        timestamp=datetime.datetime.now(datetime.timezone.utc)
+    )
+    embed.set_footer(text=f"A special message from {interaction.guild.name}")
+
+    try:
+        await member.send(embed=embed)
+        await interaction.response.send_message(f"Your message has been sent to {member.mention}!", ephemeral=True)
+    except discord.Forbidden:
+        await interaction.response.send_message(f"I couldn't send a message to {member.mention}. They might have DMs disabled.", ephemeral=True)
+    except Exception as e:
+        await interaction.response.send_message("An unexpected error occurred.", ephemeral=True)
+        print(f"DM command error: {e}")
+
+@dm.error
+async def dm_error(interaction: discord.Interaction, error: discord.app_commands.AppCommandError):
+    if isinstance(error, discord.app_commands.MissingRole):
+        await interaction.response.send_message("You do not have the required role for this command.", ephemeral=True)
+    else:
+        await interaction.response.send_message("An error occurred.", ephemeral=True)
+        print(error)
+
+
 # Meme Command
 @bot.tree.command(name="meme", description="Fetches a random meme.")
 async def meme(interaction: discord.Interaction):
