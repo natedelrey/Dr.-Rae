@@ -106,7 +106,7 @@ async def announce(interaction: discord.Interaction, title: str, message: str, c
 
     embed = discord.Embed(
         title=f"📢 {title}",
-        description=message,
+        description=message.replace('\\n', '\n'),
         color=color_obj,
         timestamp=datetime.datetime.now(datetime.timezone.utc)
     )
@@ -235,7 +235,7 @@ async def dm(interaction: discord.Interaction, member: discord.Member, title: st
 
     embed = discord.Embed(
         title=f"💌 {title}",
-        description=message,
+        description=message.replace('\\n', '\n'),
         color=discord.Color.magenta(), # A cute color!
         timestamp=datetime.datetime.now(datetime.timezone.utc)
     )
