@@ -224,6 +224,38 @@ async def removelastlog_error(interaction: discord.Interaction, error: discord.a
         await interaction.response.send_message("An error occurred.", ephemeral=True)
         print(error)
 
+# Welcome Command
+@bot.tree.command(name="welcome", description="Sends the official welcome message.")
+@discord.app_commands.checks.has_role(MANAGEMENT_ROLE_ID)
+async def welcome(interaction: discord.Interaction):
+    """Sends the formatted welcome message to the current channel."""
+    welcome_message = (
+        "Welcome to the Medical Department! We're super excited to have you join us. 😊 We know you're gonna be a great addition to the department! 🩺\n\n"
+        "First things first, you have get your student orientation done within your first two weeks. 🗓️ No stress, it's easy! Just message any of the management team and they'll get you scheduled for one. ✔️\n\n"
+        "👉 Before you jump in, make sure you read through our MD Info Hub on Trello. 🧠 It's got all the important stuff about what you can and can't do.\n\n"
+        "Trello Link: https://trello.com/b/j2jvme4Z/md-information-hub\n\n"
+        "We're happy to have you here! If you have any questions, just ask. Welcome aboard! 🚀"
+    )
+
+    embed = discord.Embed(
+        title="Welcome to the Team!",
+        description=welcome_message,
+        color=discord.Color.green()
+    )
+    embed.set_footer(text="Best,\nThe Medical Department Management Team")
+
+    await interaction.channel.send(embed=embed)
+    await interaction.response.send_message("Welcome message sent!", ephemeral=True)
+
+@welcome.error
+async def welcome_error(interaction: discord.Interaction, error: discord.app_commands.AppCommandError):
+    if isinstance(error, discord.app_commands.MissingRole):
+        await interaction.response.send_message("You do not have the required role for this command.", ephemeral=True)
+    else:
+        await interaction.response.send_message("An error occurred.", ephemeral=True)
+        print(error)
+
+
 # DM Command
 @bot.tree.command(name="dm", description="Sends a direct message to a member.")
 @discord.app_commands.checks.has_role(MANAGEMENT_ROLE_ID)
