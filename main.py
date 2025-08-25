@@ -69,6 +69,66 @@ class MD_BOT(commands.Bot):
 
 bot = MD_BOT()
 
+# --- Modal for Task Logging ---
+class LogTaskForm(discord.ui.Modal, title='Log a New Task'):
+    def __init__(self, proof: discord.Attachment):
+        super().__init__()
+        self.proof = proof
+
+    task_name = discord.ui.TextInput(
+        label='Task Name',
+        placeholder='What task did you complete?',
+        style=discord.TextStyle.short,
+        required=True
+    )
+
+    comments = discord.ui.TextInput(
+        label='Comments',
+        placeholder='Any additional comments?',
+        style=discord.TextStyle.long,
+        required=False
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        log_channel = bot.get_channel(LOG_CHANNEL_ID)
+        if not log_channel:
+            await interaction.response.send_message("Log channel not found.", ephemeral=True)
+            return
+
+        member_id = interaction.user.id
+        task_str = self.task_name.value
+        comments_str = self.comments.value or "No comments"
+
+        async with bot.db_pool.acquire() as connection:
+            await connection.execute(
+                "INSERT INTO task_logs (member_id, task, proof_url, comments, timestamp) VALUES ($1, $2, $3, $4, $5)",
+                member_id, task_str, self.proof.url, comments_str, datetime.datetime.now(datetime.timezone.utc)
+            )
+            await connection.execute(
+                "INSERT INTO weekly_tasks (member_id, tasks_completed) VALUES ($1, 1) ON CONFLICT (member_id) DO UPDATE SET tasks_completed = weekly_tasks.tasks_completed + 1",
+                member_id
+            )
+            tasks_completed = await connection.fetchval("SELECT tasks_completed FROM weekly_tasks WHERE member_id = $1", member_id)
+
+        embed = discord.Embed(
+            title="✅ Task Logged",
+            description=f"**Task:** {task_str}",
+            color=discord.Color.from_rgb(0, 255, 127),
+            timestamp=datetime.datetime.now(datetime.timezone.utc)
+        )
+        embed.set_author(name=interaction.user.display_name, icon_url=interaction.user.avatar.url)
+        embed.add_field(name="Comments", value=comments_str, inline=False)
+        embed.set_image(url=self.proof.url)
+        embed.set_footer(text=f"Member ID: {member_id}")
+
+        await log_channel.send(embed=embed)
+        await interaction.response.send_message(f"Your task has been logged! You have completed {tasks_completed} task(s) this week.", ephemeral=True)
+
+    async def on_error(self, interaction: discord.Interaction, error: Exception):
+        await interaction.response.send_message("Oops! Something went wrong.", ephemeral=True)
+        print(error)
+
+
 # --- Bot Events ---
 @bot.event
 async def on_ready():
@@ -93,17 +153,12 @@ async def on_ready():
     discord.app_commands.Choice(name="Gold", value="gold"),
 ])
 async def announce(interaction: discord.Interaction, title: str, message: str, color: str = "blue"):
-    """
-    Creates and sends an announcement embed.
-    Only members with the ANNOUNCEMENT_ROLE_ID can use this.
-    """
     announcement_channel = bot.get_channel(ANNOUNCEMENT_CHANNEL_ID)
     if not announcement_channel:
-        await interaction.response.send_message("Announcement channel not found. Please check the `ANNOUNCEMENT_CHANNEL_ID`.", ephemeral=True)
+        await interaction.response.send_message("Announcement channel not found.", ephemeral=True)
         return
 
     color_obj = getattr(discord.Color, color, discord.Color.blue)()
-
     embed = discord.Embed(
         title=f"📢 {title}",
         description=message.replace('\\n', '\n'),
@@ -111,7 +166,6 @@ async def announce(interaction: discord.Interaction, title: str, message: str, c
         timestamp=datetime.datetime.now(datetime.timezone.utc)
     )
     embed.set_footer(text=f"Announcement by {interaction.user.display_name}")
-
     await announcement_channel.send(embed=embed)
     await interaction.response.send_message("Announcement sent successfully!", ephemeral=True)
 
@@ -120,44 +174,14 @@ async def announce_error(interaction: discord.Interaction, error: discord.app_co
     if isinstance(error, discord.app_commands.MissingRole):
         await interaction.response.send_message(f"Sorry, you don't have the required role to use this command.", ephemeral=True)
     else:
-        await interaction.response.send_message("An error occurred while trying to send the announcement.", ephemeral=True)
+        await interaction.response.send_message("An error occurred.", ephemeral=True)
         print(error)
 
-# Log Command
-@bot.tree.command(name="log", description="Log a completed task with proof and comments.")
-async def log(interaction: discord.Interaction, task: str, proof: discord.Attachment, comments: str = "No comments"):
-    log_channel = bot.get_channel(LOG_CHANNEL_ID)
-    if not log_channel:
-        await interaction.response.send_message("Log channel not found.", ephemeral=True)
-        return
-
-    member_id = interaction.user.id
-    async with bot.db_pool.acquire() as connection:
-        # Add the log entry
-        await connection.execute(
-            "INSERT INTO task_logs (member_id, task, proof_url, comments, timestamp) VALUES ($1, $2, $3, $4, $5)",
-            member_id, task, proof.url, comments, datetime.datetime.now(datetime.timezone.utc)
-        )
-        # Update the weekly task count
-        await connection.execute(
-            "INSERT INTO weekly_tasks (member_id, tasks_completed) VALUES ($1, 1) ON CONFLICT (member_id) DO UPDATE SET tasks_completed = weekly_tasks.tasks_completed + 1",
-            member_id
-        )
-        tasks_completed = await connection.fetchval("SELECT tasks_completed FROM weekly_tasks WHERE member_id = $1", member_id)
-
-    embed = discord.Embed(
-        title="✅ Task Logged",
-        description=f"**Task:** {task}",
-        color=discord.Color.from_rgb(0, 255, 127),
-        timestamp=datetime.datetime.now(datetime.timezone.utc)
-    )
-    embed.set_author(name=interaction.user.display_name, icon_url=interaction.user.avatar.url)
-    embed.add_field(name="Comments", value=comments, inline=False)
-    embed.set_image(url=proof.url)
-    embed.set_footer(text=f"Member ID: {member_id}")
-
-    await log_channel.send(embed=embed)
-    await interaction.response.send_message(f"Your task has been logged! You have completed {tasks_completed} task(s) this week.", ephemeral=True)
+# Log Command (Now opens the Modal)
+@bot.tree.command(name="log", description="Log a completed task with proof.")
+async def log(interaction: discord.Interaction, proof: discord.Attachment):
+    """Opens a form to log task details after providing proof."""
+    await interaction.response.send_modal(LogTaskForm(proof=proof))
 
 # MyTasks Command
 @bot.tree.command(name="mytasks", description="Check how many tasks you have completed this week.")
@@ -201,17 +225,13 @@ async def removelastlog(interaction: discord.Interaction, member: discord.Member
     member_id = member.id
     async with bot.db_pool.acquire() as connection:
         async with connection.transaction():
-            # Find the last log for the member
             last_log = await connection.fetchrow("SELECT log_id, task FROM task_logs WHERE member_id = $1 ORDER BY timestamp DESC LIMIT 1", member_id)
             if not last_log:
                 await interaction.response.send_message(f"{member.display_name} has no tasks logged.", ephemeral=True)
                 return
 
-            # Delete the log
             await connection.execute("DELETE FROM task_logs WHERE log_id = $1", last_log['log_id'])
-            # Decrement the task count
             await connection.execute("UPDATE weekly_tasks SET tasks_completed = tasks_completed - 1 WHERE member_id = $1", member_id)
-            
             new_count = await connection.fetchval("SELECT tasks_completed FROM weekly_tasks WHERE member_id = $1", member_id)
 
     await interaction.response.send_message(f"Successfully removed the last task for {member.mention}: '{last_log['task']}'. They now have {new_count} task(s) logged.", ephemeral=True)
@@ -228,7 +248,6 @@ async def removelastlog_error(interaction: discord.Interaction, error: discord.a
 @bot.tree.command(name="welcome", description="Sends the official welcome message.")
 @discord.app_commands.checks.has_role(MANAGEMENT_ROLE_ID)
 async def welcome(interaction: discord.Interaction):
-    """Sends the formatted welcome message to the current channel."""
     welcome_message = (
         "Welcome to the Medical Department! We're super excited to have you join us. 😊 We know you're gonna be a great addition to the department! 🩺\n\n"
         "First things first, you have get your student orientation done within your first two weeks. 🗓️ No stress, it's easy! Just message any of the management team and they'll get you scheduled for one. ✔️\n\n"
@@ -236,14 +255,8 @@ async def welcome(interaction: discord.Interaction):
         "Trello Link: https://trello.com/b/j2jvme4Z/md-information-hub\n\n"
         "We're happy to have you here! If you have any questions, just ask. Welcome aboard! 🚀"
     )
-
-    embed = discord.Embed(
-        title="Welcome to the Team!",
-        description=welcome_message,
-        color=discord.Color.green()
-    )
+    embed = discord.Embed(title="Welcome to the Team!", description=welcome_message, color=discord.Color.green())
     embed.set_footer(text="Best,\nThe Medical Department Management Team")
-
     await interaction.channel.send(embed=embed)
     await interaction.response.send_message("Welcome message sent!", ephemeral=True)
 
@@ -255,12 +268,10 @@ async def welcome_error(interaction: discord.Interaction, error: discord.app_com
         await interaction.response.send_message("An error occurred.", ephemeral=True)
         print(error)
 
-
 # DM Command
 @bot.tree.command(name="dm", description="Sends a direct message to a member.")
 @discord.app_commands.checks.has_role(MANAGEMENT_ROLE_ID)
 async def dm(interaction: discord.Interaction, member: discord.Member, title: str, message: str):
-    """Sends a cute, embedded direct message to a member."""
     if member.bot:
         await interaction.response.send_message("You can't send messages to bots!", ephemeral=True)
         return
@@ -268,11 +279,10 @@ async def dm(interaction: discord.Interaction, member: discord.Member, title: st
     embed = discord.Embed(
         title=f"💌 {title}",
         description=message.replace('\\n', '\n'),
-        color=discord.Color.magenta(), # A cute color!
+        color=discord.Color.magenta(),
         timestamp=datetime.datetime.now(datetime.timezone.utc)
     )
     embed.set_footer(text=f"A special message from {interaction.guild.name}")
-
     try:
         await member.send(embed=embed)
         await interaction.response.send_message(f"Your message has been sent to {member.mention}!", ephemeral=True)
@@ -290,7 +300,6 @@ async def dm_error(interaction: discord.Interaction, error: discord.app_commands
         await interaction.response.send_message("An error occurred.", ephemeral=True)
         print(error)
 
-
 # Meme Command
 @bot.tree.command(name="meme", description="Fetches a random meme.")
 async def meme(interaction: discord.Interaction):
@@ -307,18 +316,12 @@ async def meme(interaction: discord.Interaction):
                 else:
                     await interaction.followup.send("Could not fetch a meme.", ephemeral=True)
         except Exception as e:
-            await interaction.followup.send("An error occurred while fetching a meme.", ephemeral=True)
+            await interaction.followup.send("An error occurred.", ephemeral=True)
             print(f"Meme command error: {e}")
 
 # --- Weekly Task Checking ---
-# The loop runs daily at 04:00 UTC. The reset logic only executes if it's a Sunday.
-# 04:00 UTC is:
-# - 12:00 AM EDT (Eastern Daylight Time)
-# - 11:00 PM CDT (Central Daylight Time) on Saturday
-# - 09:00 PM PDT (Pacific Daylight Time) on Saturday
 @tasks.loop(time=datetime.time(hour=4, minute=0, tzinfo=datetime.timezone.utc))
 async def check_weekly_tasks():
-    # Check if today is Sunday (weekday() == 6)
     if datetime.datetime.now(datetime.timezone.utc).weekday() == 6:
         announcement_channel = bot.get_channel(ANNOUNCEMENT_CHANNEL_ID)
         if not announcement_channel:
@@ -326,12 +329,14 @@ async def check_weekly_tasks():
             return
 
         async with bot.db_pool.acquire() as connection:
-            all_tasks = await connection.fetch("SELECT member_id, tasks_completed FROM weekly_tasks")
+            all_tasks_records = await connection.fetch("SELECT member_id, tasks_completed FROM weekly_tasks")
             
             members_met_req = []
             members_not_met_req = []
+            logged_member_ids = set()
 
-            for record in all_tasks:
+            for record in all_tasks_records:
+                logged_member_ids.add(record['member_id'])
                 member = announcement_channel.guild.get_member(record['member_id'])
                 if member:
                     if record['tasks_completed'] >= WEEKLY_REQUIREMENT:
@@ -339,20 +344,28 @@ async def check_weekly_tasks():
                     else:
                         members_not_met_req.append(f"{member.mention} ({record['tasks_completed']}/{WEEKLY_REQUIREMENT})")
 
+            # Find members who didn't log any tasks
+            all_guild_members = announcement_channel.guild.members
+            members_with_zero_tasks = []
+            for member in all_guild_members:
+                if not member.bot and member.id not in logged_member_ids:
+                    members_with_zero_tasks.append(member.mention)
+
             summary_message = "--- Weekly Task Report ---\n\n"
             if members_met_req:
                 summary_message += f"**✅ Members who met the requirement ({len(members_met_req)}):**\n" + ", ".join(members_met_req) + "\n\n"
             if members_not_met_req:
-                summary_message += f"**❌ Members who did not meet the requirement ({len(members_not_met_req)}):**\n" + "\n".join(members_not_met_req) + "\n\n"
+                summary_message += f"**❌ Members below quota ({len(members_not_met_req)}):**\n" + "\n".join(members_not_met_req) + "\n\n"
+            if members_with_zero_tasks:
+                summary_message += f"**🚫 Members with 0 tasks logged ({len(members_with_zero_tasks)}):**\n" + ", ".join(members_with_zero_tasks) + "\n\n"
             
-            if not members_met_req and not members_not_met_req:
+            if not all_tasks_records:
                  summary_message += "**No tasks were logged this week.**\n\n"
 
             summary_message += "Task counts have now been reset for the new week."
             report_embed = discord.Embed(title="Weekly Task Summary", description=summary_message, color=discord.Color.gold(), timestamp=datetime.datetime.now(datetime.timezone.utc))
             await announcement_channel.send(embed=report_embed)
 
-            # Reset tasks for the new week
             await connection.execute("TRUNCATE TABLE weekly_tasks, task_logs")
             print("Weekly tasks checked and reset.")
 
