@@ -39,7 +39,8 @@ class MD_BOT(commands.Bot):
     async def setup_hook(self):
         # Create a database connection pool
         try:
-            self.db_pool = await asyncpg.create_pool(DATABASE_URL)
+            # Added min_size and max_size to make the pool more resilient
+            self.db_pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=10)
             print("Successfully connected to the database.")
         except Exception as e:
             print(f"Failed to connect to the database: {e}")
