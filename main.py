@@ -35,7 +35,6 @@ class MD_BOT(commands.Bot):
         # Using a prefix that won't conflict with slash commands
         super().__init__(command_prefix='!', intents=intents)
         self.db_pool = None
-        self.roblox_sessions = {} # To track ongoing sessions
 
     async def setup_hook(self):
         # Create a database connection pool
@@ -68,13 +67,20 @@ class MD_BOT(commands.Bot):
             await connection.execute('''
                 CREATE TABLE IF NOT EXISTS roblox_verification (
                     discord_id BIGINT PRIMARY KEY,
-                    roblox_id BIGINT
+                    roblox_id BIGINT UNIQUE
                 );
             ''')
             await connection.execute('''
                 CREATE TABLE IF NOT EXISTS roblox_time (
                     member_id BIGINT PRIMARY KEY,
                     time_spent INT DEFAULT 0 -- in seconds
+                );
+            ''')
+            # New table for persistent sessions
+            await connection.execute('''
+                CREATE TABLE IF NOT EXISTS roblox_sessions (
+                    roblox_id BIGINT PRIMARY KEY,
+                    start_time TIMESTAMPTZ
                 );
             ''')
         print("Database tables are ready.")
@@ -95,55 +101,49 @@ class MD_BOT(commands.Bot):
         print("Web server for Roblox integration is running.")
 
     async def roblox_handler(self, request):
-        # --- Debugging Logs ---
-        print("Received a request from Roblox.")
         if request.headers.get("X-Secret-Key") != API_SECRET_KEY:
-            print("Request rejected: Invalid secret key.")
             return web.Response(status=401) # Unauthorized
 
         data = await request.json()
         roblox_id = data.get("robloxId")
         status = data.get("status")
-        print(f"Request data: Roblox ID = {roblox_id}, Status = {status}")
 
         async with self.db_pool.acquire() as connection:
             discord_id = await connection.fetchval("SELECT discord_id FROM roblox_verification WHERE roblox_id = $1", roblox_id)
-        
-        print(f"Found Discord ID: {discord_id}")
 
         if discord_id:
             if status == "joined":
-                self.roblox_sessions[roblox_id] = datetime.datetime.now(datetime.timezone.utc)
-                print(f"Started session for Roblox ID {roblox_id} (Discord ID: {discord_id})")
-            elif status == "left" and roblox_id in self.roblox_sessions:
-                session_start = self.roblox_sessions.pop(roblox_id)
-                duration = (datetime.datetime.now(datetime.timezone.utc) - session_start).total_seconds()
-                print(f"Ended session for Roblox ID {roblox_id}. Duration: {duration} seconds.")
-                
                 async with self.db_pool.acquire() as connection:
                     await connection.execute(
-                        "INSERT INTO roblox_time (member_id, time_spent) VALUES ($1, $2) ON CONFLICT (member_id) DO UPDATE SET time_spent = roblox_time.time_spent + $2",
-                        discord_id, int(duration)
+                        "INSERT INTO roblox_sessions (roblox_id, start_time) VALUES ($1, $2) ON CONFLICT (roblox_id) DO UPDATE SET start_time = $2",
+                        roblox_id, datetime.datetime.now(datetime.timezone.utc)
                     )
-                    new_total_time = await connection.fetchval("SELECT time_spent FROM roblox_time WHERE member_id = $1", discord_id)
-                
-                print(f"Logged {duration} seconds for Discord ID {discord_id}. New total: {new_total_time} seconds.")
-
-                # --- Send Activity Log ---
-                activity_log_channel = self.get_channel(ACTIVITY_LOG_CHANNEL_ID)
-                if activity_log_channel:
-                    guild = self.get_guild(activity_log_channel.guild.id)
-                    member = guild.get_member(discord_id)
-                    if member:
-                        embed = discord.Embed(
-                            title="Roblox Activity Logged",
-                            description=f"**{member.display_name}** was on-site for **{int(duration // 60)} minutes**.",
-                            color=discord.Color.blue(),
-                            timestamp=datetime.datetime.now(datetime.timezone.utc)
+            elif status == "left":
+                async with self.db_pool.acquire() as connection:
+                    session_start = await connection.fetchval("SELECT start_time FROM roblox_sessions WHERE roblox_id = $1", roblox_id)
+                    if session_start:
+                        await connection.execute("DELETE FROM roblox_sessions WHERE roblox_id = $1", roblox_id)
+                        duration = (datetime.datetime.now(datetime.timezone.utc) - session_start).total_seconds()
+                        
+                        await connection.execute(
+                            "INSERT INTO roblox_time (member_id, time_spent) VALUES ($1, $2) ON CONFLICT (member_id) DO UPDATE SET time_spent = roblox_time.time_spent + $2",
+                            discord_id, int(duration)
                         )
-                        embed.set_footer(text=f"Total on-site time this week: {int(new_total_time // 60)} minutes")
-                        await activity_log_channel.send(embed=embed)
-
+                        new_total_time = await connection.fetchval("SELECT time_spent FROM roblox_time WHERE member_id = $1", discord_id)
+                        
+                        activity_log_channel = self.get_channel(ACTIVITY_LOG_CHANNEL_ID)
+                        if activity_log_channel:
+                            guild = self.get_guild(activity_log_channel.guild.id)
+                            member = guild.get_member(discord_id)
+                            if member:
+                                embed = discord.Embed(
+                                    title="Roblox Activity Logged",
+                                    description=f"**{member.display_name}** was on-site for **{int(duration // 60)} minutes**.",
+                                    color=discord.Color.blue(),
+                                    timestamp=datetime.datetime.now(datetime.timezone.utc)
+                                )
+                                embed.set_footer(text=f"Total on-site time this week: {int(new_total_time // 60)} minutes")
+                                await activity_log_channel.send(embed=embed)
         return web.Response(status=200)
 
 
@@ -456,7 +456,7 @@ async def check_weekly_tasks():
             summary_message += "Task and time counts have now been reset for the new week."
             
             await send_long_embed(target=announcement_channel, title="Weekly Task Summary", description=summary_message, color=discord.Color.gold(), footer_text=None)
-            await connection.execute("TRUNCATE TABLE weekly_tasks, task_logs, roblox_time")
+            await connection.execute("TRUNCATE TABLE weekly_tasks, task_logs, roblox_time, roblox_sessions")
             print("Weekly tasks and time checked and reset.")
 
 @check_weekly_tasks.before_loop
