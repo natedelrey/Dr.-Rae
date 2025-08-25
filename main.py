@@ -24,6 +24,7 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 # Define the intents your bot needs.
 intents = discord.Intents.default()
 intents.members = True
+intents.message_content = True # Added privileged intent
 
 class MD_BOT(commands.Bot):
     def __init__(self):
@@ -99,6 +100,10 @@ class LogTaskForm(discord.ui.Modal, title='Log a New Task'):
         task_str = self.task_name.value
         comments_str = self.comments.value or "No comments"
 
+        # Truncate comments if they exceed the 1024 character limit for embed fields
+        if len(comments_str) > 1024:
+            comments_str = comments_str[:1021] + "..."
+
         async with bot.db_pool.acquire() as connection:
             await connection.execute(
                 "INSERT INTO task_logs (member_id, task, proof_url, comments, timestamp) VALUES ($1, $2, $3, $4, $5)",
@@ -159,9 +164,15 @@ async def announce(interaction: discord.Interaction, title: str, message: str, c
         return
 
     color_obj = getattr(discord.Color, color, discord.Color.blue)()
+    
+    description = message.replace('\\n', '\n')
+    # Truncate description if it exceeds the 4096 character limit
+    if len(description) > 4096:
+        description = description[:4093] + "..."
+
     embed = discord.Embed(
         title=f"📢 {title}",
-        description=message.replace('\\n', '\n'),
+        description=description,
         color=color_obj,
         timestamp=datetime.datetime.now(datetime.timezone.utc)
     )
@@ -276,9 +287,14 @@ async def dm(interaction: discord.Interaction, member: discord.Member, title: st
         await interaction.response.send_message("You can't send messages to bots!", ephemeral=True)
         return
 
+    description = message.replace('\\n', '\n')
+    # Truncate description if it exceeds the 4096 character limit
+    if len(description) > 4096:
+        description = description[:4093] + "..."
+
     embed = discord.Embed(
         title=f"💌 {title}",
-        description=message.replace('\\n', '\n'),
+        description=description,
         color=discord.Color.magenta(),
         timestamp=datetime.datetime.now(datetime.timezone.utc)
     )
@@ -316,7 +332,7 @@ async def meme(interaction: discord.Interaction):
                 else:
                     await interaction.followup.send("Could not fetch a meme.", ephemeral=True)
         except Exception as e:
-            await interaction.followup.send("An error occurred.", ephemeral=True)
+            await interaction.followup.send("An error occurred while fetching a meme.", ephemeral=True)
             print(f"Meme command error: {e}")
 
 # --- Weekly Task Checking ---
@@ -344,7 +360,6 @@ async def check_weekly_tasks():
                     else:
                         members_not_met_req.append(f"{member.mention} ({record['tasks_completed']}/{WEEKLY_REQUIREMENT})")
 
-            # Find members who didn't log any tasks
             all_guild_members = announcement_channel.guild.members
             members_with_zero_tasks = []
             for member in all_guild_members:
@@ -363,8 +378,17 @@ async def check_weekly_tasks():
                  summary_message += "**No tasks were logged this week.**\n\n"
 
             summary_message += "Task counts have now been reset for the new week."
-            report_embed = discord.Embed(title="Weekly Task Summary", description=summary_message, color=discord.Color.gold(), timestamp=datetime.datetime.now(datetime.timezone.utc))
-            await announcement_channel.send(embed=report_embed)
+            
+            # Split the message into multiple embeds if it's too long
+            if len(summary_message) <= 4096:
+                report_embed = discord.Embed(title="Weekly Task Summary", description=summary_message, color=discord.Color.gold(), timestamp=datetime.datetime.now(datetime.timezone.utc))
+                await announcement_channel.send(embed=report_embed)
+            else:
+                chunks = [summary_message[i:i + 4000] for i in range(0, len(summary_message), 4000)]
+                for i, chunk in enumerate(chunks):
+                    title = "Weekly Task Summary" if i == 0 else f"Weekly Task Summary (Part {i+1})"
+                    embed = discord.Embed(title=title, description=chunk, color=discord.Color.gold(), timestamp=datetime.datetime.now(datetime.timezone.utc))
+                    await announcement_channel.send(embed=embed)
 
             await connection.execute("TRUNCATE TABLE weekly_tasks, task_logs")
             print("Weekly tasks checked and reset.")
