@@ -89,11 +89,11 @@ def smart_chunk(text, size=4000):
     chunks.append(text)
     return chunks
 
-async def send_long_embed(target, title, description, color, footer_text):
+async def send_long_embed(target, title, description, color, footer_text, author_name=None, author_icon_url=None, image_url=None):
     """A helper function to send long messages by splitting them into multiple embeds."""
     chunks = smart_chunk(description)
     
-    # First embed with title and footer
+    # First embed with all the details
     embed = discord.Embed(
         title=title,
         description=chunks[0],
@@ -102,6 +102,10 @@ async def send_long_embed(target, title, description, color, footer_text):
     )
     if footer_text:
         embed.set_footer(text=footer_text)
+    if author_name:
+        embed.set_author(name=author_name, icon_url=author_icon_url)
+    if image_url:
+        embed.set_image(url=image_url)
     
     await target.send(embed=embed)
 
@@ -145,9 +149,6 @@ class LogTaskForm(discord.ui.Modal, title='Log a New Task'):
         task_str = self.task_name.value
         comments_str = self.comments.value or "No comments"
 
-        if len(comments_str) > 1024:
-            comments_str = comments_str[:1021] + "..."
-
         async with bot.db_pool.acquire() as connection:
             await connection.execute(
                 "INSERT INTO task_logs (member_id, task, proof_url, comments, timestamp) VALUES ($1, $2, $3, $4, $5)",
@@ -159,18 +160,19 @@ class LogTaskForm(discord.ui.Modal, title='Log a New Task'):
             )
             tasks_completed = await connection.fetchval("SELECT tasks_completed FROM weekly_tasks WHERE member_id = $1", member_id)
 
-        embed = discord.Embed(
-            title="✅ Task Logged",
-            description=f"**Task:** {task_str}",
-            color=discord.Color.from_rgb(0, 255, 127),
-            timestamp=datetime.datetime.now(datetime.timezone.utc)
-        )
-        embed.set_author(name=interaction.user.display_name, icon_url=interaction.user.avatar.url)
-        embed.add_field(name="Comments", value=comments_str, inline=False)
-        embed.set_image(url=self.proof.url)
-        embed.set_footer(text=f"Member ID: {member_id}")
+        full_description = f"**Task:** {task_str}\n\n**Comments:**\n{comments_str}"
 
-        await log_channel.send(embed=embed)
+        await send_long_embed(
+            target=log_channel,
+            title="✅ Task Logged",
+            description=full_description,
+            color=discord.Color.from_rgb(0, 255, 127),
+            footer_text=f"Member ID: {member_id}",
+            author_name=interaction.user.display_name,
+            author_icon_url=interaction.user.avatar.url,
+            image_url=self.proof.url
+        )
+
         await interaction.response.send_message(f"Your task has been logged! You have completed {tasks_completed} task(s) this week.", ephemeral=True)
 
     async def on_error(self, interaction: discord.Interaction, error: Exception):
@@ -358,7 +360,7 @@ async def meme(interaction: discord.Interaction):
                 else:
                     await interaction.followup.send("Could not fetch a meme.", ephemeral=True)
         except Exception as e:
-            await interaction.followup.send("An error occurred.", ephemeral=True)
+            await interaction.followup.send("An error occurred while fetching a meme.", ephemeral=True)
             print(f"Meme command error: {e}")
 
 # --- Weekly Task Checking ---
