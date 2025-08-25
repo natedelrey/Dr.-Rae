@@ -201,18 +201,21 @@ async def on_ready():
 @bot.tree.command(name="verify", description="Link your Roblox account to the bot.")
 async def verify(interaction: discord.Interaction, roblox_username: str):
     """Links a user's Roblox account to their Discord account."""
+    payload = {"usernames": [roblox_username], "excludeBannedUsers": True}
     async with aiohttp.ClientSession() as session:
-        async with session.get(f"https://api.roblox.com/users/get-by-username?username={roblox_username}") as resp:
+        async with session.post("https://users.roblox.com/v1/usernames/users", json=payload) as resp:
             if resp.status == 200:
                 data = await resp.json()
-                if "Id" in data:
-                    roblox_id = data["Id"]
+                if data["data"]:
+                    user_data = data["data"][0]
+                    roblox_id = user_data["id"]
+                    roblox_name = user_data["name"]
                     async with bot.db_pool.acquire() as connection:
                         await connection.execute(
                             "INSERT INTO roblox_verification (discord_id, roblox_id) VALUES ($1, $2) ON CONFLICT (discord_id) DO UPDATE SET roblox_id = $2",
                             interaction.user.id, roblox_id
                         )
-                    await interaction.response.send_message(f"Successfully verified as {roblox_username}!", ephemeral=True)
+                    await interaction.response.send_message(f"Successfully verified as {roblox_name}!", ephemeral=True)
                 else:
                     await interaction.response.send_message("Could not find a Roblox user with that name.", ephemeral=True)
             else:
