@@ -131,19 +131,21 @@ class MD_BOT(commands.Bot):
                         )
                         new_total_time = await connection.fetchval("SELECT time_spent FROM roblox_time WHERE member_id = $1", discord_id)
                         
-                        activity_log_channel = self.get_channel(ACTIVITY_LOG_CHANNEL_ID)
-                        if activity_log_channel:
-                            guild = self.get_guild(activity_log_channel.guild.id)
-                            member = guild.get_member(discord_id)
-                            if member:
-                                embed = discord.Embed(
-                                    title="Roblox Activity Logged",
-                                    description=f"**{member.display_name}** was on-site for **{int(duration // 60)} minutes**.",
-                                    color=discord.Color.blue(),
-                                    timestamp=datetime.datetime.now(datetime.timezone.utc)
-                                )
-                                embed.set_footer(text=f"Total on-site time this week: {int(new_total_time // 60)} minutes")
-                                await activity_log_channel.send(embed=embed)
+                        try:
+                            activity_log_channel = await self.fetch_channel(ACTIVITY_LOG_CHANNEL_ID)
+                            if activity_log_channel:
+                                member = await activity_log_channel.guild.fetch_member(discord_id)
+                                if member:
+                                    embed = discord.Embed(
+                                        title="Roblox Activity Logged",
+                                        description=f"**{member.display_name}** was on-site for **{int(duration // 60)} minutes**.",
+                                        color=discord.Color.blue(),
+                                        timestamp=datetime.datetime.now(datetime.timezone.utc)
+                                    )
+                                    embed.set_footer(text=f"Total on-site time this week: {int(new_total_time // 60)} minutes")
+                                    await activity_log_channel.send(embed=embed)
+                        except Exception as e:
+                            print(f"Error sending activity log: {e}")
         return web.Response(status=200)
 
 
