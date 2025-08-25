@@ -71,9 +71,27 @@ class MD_BOT(commands.Bot):
 bot = MD_BOT()
 
 # --- Helper Function for Long Messages ---
+def smart_chunk(text, size=4000):
+    """Splits text into chunks of a given size without breaking words or lines."""
+    chunks = []
+    while len(text) > size:
+        # Find the last newline character before the size limit
+        split_index = text.rfind('\n', 0, size)
+        # If no newline, find the last space
+        if split_index == -1:
+            split_index = text.rfind(' ', 0, size)
+        # If no space either, force a split at the size limit
+        if split_index == -1:
+            split_index = size
+        
+        chunks.append(text[:split_index])
+        text = text[split_index:].lstrip() # Remove leading space from the next chunk
+    chunks.append(text)
+    return chunks
+
 async def send_long_embed(target, title, description, color, footer_text):
     """A helper function to send long messages by splitting them into multiple embeds."""
-    chunks = [description[i:i + 4000] for i in range(0, len(description), 4000)]
+    chunks = smart_chunk(description)
     
     # First embed with title and footer
     embed = discord.Embed(
