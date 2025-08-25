@@ -70,6 +70,33 @@ class MD_BOT(commands.Bot):
 
 bot = MD_BOT()
 
+# --- Helper Function for Long Messages ---
+async def send_long_embed(target, title, description, color, footer_text):
+    """A helper function to send long messages by splitting them into multiple embeds."""
+    chunks = [description[i:i + 4000] for i in range(0, len(description), 4000)]
+    
+    # First embed with title and footer
+    embed = discord.Embed(
+        title=title,
+        description=chunks[0],
+        color=color,
+        timestamp=datetime.datetime.now(datetime.timezone.utc)
+    )
+    if footer_text:
+        embed.set_footer(text=footer_text)
+    
+    await target.send(embed=embed)
+
+    # Subsequent embeds for the rest of the message
+    if len(chunks) > 1:
+        for i, chunk in enumerate(chunks[1:]):
+            follow_up_embed = discord.Embed(
+                description=chunk,
+                color=color
+            ).set_footer(text=f"Part {i+2}/{len(chunks)}")
+            await target.send(embed=follow_up_embed)
+
+
 # --- Modal for Task Logging ---
 class LogTaskForm(discord.ui.Modal, title='Log a New Task'):
     def __init__(self, proof: discord.Attachment):
@@ -100,7 +127,6 @@ class LogTaskForm(discord.ui.Modal, title='Log a New Task'):
         task_str = self.task_name.value
         comments_str = self.comments.value or "No comments"
 
-        # Truncate comments if they exceed the 1024 character limit for embed fields
         if len(comments_str) > 1024:
             comments_str = comments_str[:1021] + "..."
 
@@ -140,7 +166,6 @@ async def on_ready():
     """Event that runs when the bot is connected and ready."""
     print(f'Logged in as {bot.user.name}')
     print(f'Discord.py Version: {discord.__version__}')
-    # Start the weekly task check loop.
     check_weekly_tasks.start()
 
 # --- Commands ---
@@ -164,42 +189,29 @@ async def announce(interaction: discord.Interaction, title: str, message: str, c
         return
 
     color_obj = getattr(discord.Color, color, discord.Color.blue)()
-    
     description = message.replace('\\n', '\n')
     
-    # Split the message into multiple embeds if it's too long
-    chunks = [description[i:i + 4096] for i in range(0, len(description), 4096)]
-    
-    # First embed with the title and footer
-    embed = discord.Embed(
+    await send_long_embed(
+        target=announcement_channel,
         title=f"📢 {title}",
-        description=chunks[0],
+        description=description,
         color=color_obj,
-        timestamp=datetime.datetime.now(datetime.timezone.utc)
+        footer_text=f"Announcement by {interaction.user.display_name}"
     )
-    embed.set_footer(text=f"Announcement by {interaction.user.display_name}")
-    await announcement_channel.send(embed=embed)
-
-    # Subsequent embeds for the rest of the message
-    if len(chunks) > 1:
-        for chunk in chunks[1:]:
-            follow_up_embed = discord.Embed(description=chunk, color=color_obj)
-            await announcement_channel.send(embed=follow_up_embed)
 
     await interaction.response.send_message("Announcement sent successfully!", ephemeral=True)
 
 @announce.error
 async def announce_error(interaction: discord.Interaction, error: discord.app_commands.AppCommandError):
     if isinstance(error, discord.app_commands.MissingRole):
-        await interaction.response.send_message(f"Sorry, you don't have the required role to use this command.", ephemeral=True)
+        await interaction.response.send_message(f"Sorry, you don't have the required role.", ephemeral=True)
     else:
         await interaction.response.send_message("An error occurred.", ephemeral=True)
         print(error)
 
-# Log Command (Now opens the Modal)
+# Log Command
 @bot.tree.command(name="log", description="Log a completed task with proof.")
 async def log(interaction: discord.Interaction, proof: discord.Attachment):
-    """Opens a form to log task details after providing proof."""
     await interaction.response.send_modal(LogTaskForm(proof=proof))
 
 # MyTasks Command
@@ -208,7 +220,7 @@ async def mytasks(interaction: discord.Interaction):
     member_id = interaction.user.id
     async with bot.db_pool.acquire() as connection:
         tasks_completed = await connection.fetchval("SELECT tasks_completed FROM weekly_tasks WHERE member_id = $1", member_id) or 0
-    await interaction.response.send_message(f"You have completed **{tasks_completed}** out of **{WEEKLY_REQUIREMENT}** required tasks this week.", ephemeral=True)
+    await interaction.response.send_message(f"You have completed **{tasks_completed}** of **{WEEKLY_REQUIREMENT}** tasks.", ephemeral=True)
 
 # Leaderboard Command
 @bot.tree.command(name="leaderboard", description="Displays the weekly task leaderboard.")
@@ -217,23 +229,19 @@ async def leaderboard(interaction: discord.Interaction):
         sorted_users = await connection.fetch("SELECT member_id, tasks_completed FROM weekly_tasks ORDER BY tasks_completed DESC LIMIT 10")
 
     if not sorted_users:
-        await interaction.response.send_message("No tasks have been logged this week.", ephemeral=True)
+        await interaction.response.send_message("No tasks logged this week.", ephemeral=True)
         return
 
     embed = discord.Embed(title="🏆 Weekly Task Leaderboard", color=discord.Color.gold(), timestamp=datetime.datetime.now(datetime.timezone.utc))
     description = ""
     for i, record in enumerate(sorted_users):
-        member_id = record['member_id']
-        tasks_completed = record['tasks_completed']
-        member = interaction.guild.get_member(member_id)
-        member_name = member.display_name if member else f"Unknown User ({member_id})"
-        
+        member = interaction.guild.get_member(record['member_id'])
+        member_name = member.display_name if member else f"Unknown User ({record['member_id']})"
         rank_emoji = ["🥇", "🥈", "🥉"]
         if i < 3:
-            description += f"{rank_emoji[i]} **{member_name}** - {tasks_completed} tasks\n"
+            description += f"{rank_emoji[i]} **{member_name}** - {record['tasks_completed']} tasks\n"
         else:
-            description += f"**{i+1}.** {member_name} - {tasks_completed} tasks\n"
-
+            description += f"**{i+1}.** {member_name} - {record['tasks_completed']} tasks\n"
     embed.description = description
     await interaction.response.send_message(embed=embed)
 
@@ -248,17 +256,15 @@ async def removelastlog(interaction: discord.Interaction, member: discord.Member
             if not last_log:
                 await interaction.response.send_message(f"{member.display_name} has no tasks logged.", ephemeral=True)
                 return
-
             await connection.execute("DELETE FROM task_logs WHERE log_id = $1", last_log['log_id'])
             await connection.execute("UPDATE weekly_tasks SET tasks_completed = tasks_completed - 1 WHERE member_id = $1", member_id)
             new_count = await connection.fetchval("SELECT tasks_completed FROM weekly_tasks WHERE member_id = $1", member_id)
-
-    await interaction.response.send_message(f"Successfully removed the last task for {member.mention}: '{last_log['task']}'. They now have {new_count} task(s) logged.", ephemeral=True)
+    await interaction.response.send_message(f"Removed last task for {member.mention}: '{last_log['task']}'. They now have {new_count} tasks.", ephemeral=True)
 
 @removelastlog.error
 async def removelastlog_error(interaction: discord.Interaction, error: discord.app_commands.AppCommandError):
     if isinstance(error, discord.app_commands.MissingRole):
-        await interaction.response.send_message("You do not have the required role for this command.", ephemeral=True)
+        await interaction.response.send_message("You do not have the required role.", ephemeral=True)
     else:
         await interaction.response.send_message("An error occurred.", ephemeral=True)
         print(error)
@@ -282,7 +288,7 @@ async def welcome(interaction: discord.Interaction):
 @welcome.error
 async def welcome_error(interaction: discord.Interaction, error: discord.app_commands.AppCommandError):
     if isinstance(error, discord.app_commands.MissingRole):
-        await interaction.response.send_message("You do not have the required role for this command.", ephemeral=True)
+        await interaction.response.send_message("You do not have the required role.", ephemeral=True)
     else:
         await interaction.response.send_message("An error occurred.", ephemeral=True)
         print(error)
@@ -294,42 +300,26 @@ async def dm(interaction: discord.Interaction, member: discord.Member, title: st
     if member.bot:
         await interaction.response.send_message("You can't send messages to bots!", ephemeral=True)
         return
-
     description = message.replace('\\n', '\n')
-    
     try:
-        # Split the message into multiple embeds if it's too long
-        chunks = [description[i:i + 4096] for i in range(0, len(description), 4096)]
-        
-        # First embed with the title and footer
-        embed = discord.Embed(
+        await send_long_embed(
+            target=member,
             title=f"💌 {title}",
-            description=chunks[0],
+            description=description,
             color=discord.Color.magenta(),
-            timestamp=datetime.datetime.now(datetime.timezone.utc)
+            footer_text=f"A special message from {interaction.guild.name}"
         )
-        embed.set_footer(text=f"A special message from {interaction.guild.name}")
-        await member.send(embed=embed)
-
-        # Subsequent embeds for the rest of the message
-        if len(chunks) > 1:
-            for chunk in chunks[1:]:
-                follow_up_embed = discord.Embed(description=chunk, color=discord.Color.magenta())
-                await member.send(embed=follow_up_embed)
-
         await interaction.response.send_message(f"Your message has been sent to {member.mention}!", ephemeral=True)
-
     except discord.Forbidden:
-        await interaction.response.send_message(f"I couldn't send a message to {member.mention}. They might have DMs disabled.", ephemeral=True)
+        await interaction.response.send_message(f"I couldn't message {member.mention}. They might have DMs disabled.", ephemeral=True)
     except Exception as e:
         await interaction.response.send_message("An unexpected error occurred.", ephemeral=True)
         print(f"DM command error: {e}")
 
-
 @dm.error
 async def dm_error(interaction: discord.Interaction, error: discord.app_commands.AppCommandError):
     if isinstance(error, discord.app_commands.MissingRole):
-        await interaction.response.send_message("You do not have the required role for this command.", ephemeral=True)
+        await interaction.response.send_message("You do not have the required role.", ephemeral=True)
     else:
         await interaction.response.send_message("An error occurred.", ephemeral=True)
         print(error)
@@ -350,7 +340,7 @@ async def meme(interaction: discord.Interaction):
                 else:
                     await interaction.followup.send("Could not fetch a meme.", ephemeral=True)
         except Exception as e:
-            await interaction.followup.send("An error occurred while fetching a meme.", ephemeral=True)
+            await interaction.followup.send("An error occurred.", ephemeral=True)
             print(f"Meme command error: {e}")
 
 # --- Weekly Task Checking ---
@@ -365,10 +355,7 @@ async def check_weekly_tasks():
         async with bot.db_pool.acquire() as connection:
             all_tasks_records = await connection.fetch("SELECT member_id, tasks_completed FROM weekly_tasks")
             
-            members_met_req = []
-            members_not_met_req = []
-            logged_member_ids = set()
-
+            members_met_req, members_not_met_req, logged_member_ids = [], [], set()
             for record in all_tasks_records:
                 logged_member_ids.add(record['member_id'])
                 member = announcement_channel.guild.get_member(record['member_id'])
@@ -378,35 +365,26 @@ async def check_weekly_tasks():
                     else:
                         members_not_met_req.append(f"{member.mention} ({record['tasks_completed']}/{WEEKLY_REQUIREMENT})")
 
-            all_guild_members = announcement_channel.guild.members
-            members_with_zero_tasks = []
-            for member in all_guild_members:
-                if not member.bot and member.id not in logged_member_ids:
-                    members_with_zero_tasks.append(member.mention)
+            members_with_zero_tasks = [m.mention for m in announcement_channel.guild.members if not m.bot and m.id not in logged_member_ids]
 
             summary_message = "--- Weekly Task Report ---\n\n"
             if members_met_req:
-                summary_message += f"**✅ Members who met the requirement ({len(members_met_req)}):**\n" + ", ".join(members_met_req) + "\n\n"
+                summary_message += f"**✅ Met Requirement ({len(members_met_req)}):**\n" + ", ".join(members_met_req) + "\n\n"
             if members_not_met_req:
-                summary_message += f"**❌ Members below quota ({len(members_not_met_req)}):**\n" + "\n".join(members_not_met_req) + "\n\n"
+                summary_message += f"**❌ Below Quota ({len(members_not_met_req)}):**\n" + "\n".join(members_not_met_req) + "\n\n"
             if members_with_zero_tasks:
-                summary_message += f"**🚫 Members with 0 tasks logged ({len(members_with_zero_tasks)}):**\n" + ", ".join(members_with_zero_tasks) + "\n\n"
-            
+                summary_message += f"**🚫 0 Tasks Logged ({len(members_with_zero_tasks)}):**\n" + ", ".join(members_with_zero_tasks) + "\n\n"
             if not all_tasks_records:
                  summary_message += "**No tasks were logged this week.**\n\n"
-
             summary_message += "Task counts have now been reset for the new week."
             
-            # Split the message into multiple embeds if it's too long
-            if len(summary_message) <= 4096:
-                report_embed = discord.Embed(title="Weekly Task Summary", description=summary_message, color=discord.Color.gold(), timestamp=datetime.datetime.now(datetime.timezone.utc))
-                await announcement_channel.send(embed=report_embed)
-            else:
-                chunks = [summary_message[i:i + 4000] for i in range(0, len(summary_message), 4000)]
-                for i, chunk in enumerate(chunks):
-                    title = "Weekly Task Summary" if i == 0 else f"Weekly Task Summary (Part {i+1})"
-                    embed = discord.Embed(title=title, description=chunk, color=discord.Color.gold(), timestamp=datetime.datetime.now(datetime.timezone.utc))
-                    await announcement_channel.send(embed=embed)
+            await send_long_embed(
+                target=announcement_channel,
+                title="Weekly Task Summary",
+                description=summary_message,
+                color=discord.Color.gold(),
+                footer_text=None
+            )
 
             await connection.execute("TRUNCATE TABLE weekly_tasks, task_logs")
             print("Weekly tasks checked and reset.")
