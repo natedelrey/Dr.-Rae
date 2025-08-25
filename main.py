@@ -166,18 +166,26 @@ async def announce(interaction: discord.Interaction, title: str, message: str, c
     color_obj = getattr(discord.Color, color, discord.Color.blue)()
     
     description = message.replace('\\n', '\n')
-    # Truncate description if it exceeds the 4096 character limit
-    if len(description) > 4096:
-        description = description[:4093] + "..."
-
+    
+    # Split the message into multiple embeds if it's too long
+    chunks = [description[i:i + 4096] for i in range(0, len(description), 4096)]
+    
+    # First embed with the title and footer
     embed = discord.Embed(
         title=f"📢 {title}",
-        description=description,
+        description=chunks[0],
         color=color_obj,
         timestamp=datetime.datetime.now(datetime.timezone.utc)
     )
     embed.set_footer(text=f"Announcement by {interaction.user.display_name}")
     await announcement_channel.send(embed=embed)
+
+    # Subsequent embeds for the rest of the message
+    if len(chunks) > 1:
+        for chunk in chunks[1:]:
+            follow_up_embed = discord.Embed(description=chunk, color=color_obj)
+            await announcement_channel.send(embed=follow_up_embed)
+
     await interaction.response.send_message("Announcement sent successfully!", ephemeral=True)
 
 @announce.error
@@ -288,25 +296,35 @@ async def dm(interaction: discord.Interaction, member: discord.Member, title: st
         return
 
     description = message.replace('\\n', '\n')
-    # Truncate description if it exceeds the 4096 character limit
-    if len(description) > 4096:
-        description = description[:4093] + "..."
-
-    embed = discord.Embed(
-        title=f"💌 {title}",
-        description=description,
-        color=discord.Color.magenta(),
-        timestamp=datetime.datetime.now(datetime.timezone.utc)
-    )
-    embed.set_footer(text=f"A special message from {interaction.guild.name}")
+    
     try:
+        # Split the message into multiple embeds if it's too long
+        chunks = [description[i:i + 4096] for i in range(0, len(description), 4096)]
+        
+        # First embed with the title and footer
+        embed = discord.Embed(
+            title=f"💌 {title}",
+            description=chunks[0],
+            color=discord.Color.magenta(),
+            timestamp=datetime.datetime.now(datetime.timezone.utc)
+        )
+        embed.set_footer(text=f"A special message from {interaction.guild.name}")
         await member.send(embed=embed)
+
+        # Subsequent embeds for the rest of the message
+        if len(chunks) > 1:
+            for chunk in chunks[1:]:
+                follow_up_embed = discord.Embed(description=chunk, color=discord.Color.magenta())
+                await member.send(embed=follow_up_embed)
+
         await interaction.response.send_message(f"Your message has been sent to {member.mention}!", ephemeral=True)
+
     except discord.Forbidden:
         await interaction.response.send_message(f"I couldn't send a message to {member.mention}. They might have DMs disabled.", ephemeral=True)
     except Exception as e:
         await interaction.response.send_message("An unexpected error occurred.", ephemeral=True)
         print(f"DM command error: {e}")
+
 
 @dm.error
 async def dm_error(interaction: discord.Interaction, error: discord.app_commands.AppCommandError):
