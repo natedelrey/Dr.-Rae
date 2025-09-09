@@ -15,20 +15,23 @@ load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ANNOUNCEMENT_CHANNEL_ID = int(os.getenv("ANNOUNCEMENT_CHANNEL_ID"))
 LOG_CHANNEL_ID = int(os.getenv("LOG_CHANNEL_ID"))
-ACTIVITY_LOG_CHANNEL_ID = 1409646416829354095 # The new channel for Roblox activity logs
+ACTIVITY_LOG_CHANNEL_ID = 1409646416829354095  # The new channel for Roblox activity logs
 WEEKLY_REQUIREMENT = 3
-WEEKLY_TIME_REQUIREMENT = 45 # in minutes
+WEEKLY_TIME_REQUIREMENT = 45  # in minutes
 ANNOUNCEMENT_ROLE_ID = int(os.getenv("ANNOUNCEMENT_ROLE_ID"))
 MANAGEMENT_ROLE_ID = int(os.getenv("MANAGEMENT_ROLE_ID"))
 DATABASE_URL = os.getenv("DATABASE_URL")
-API_SECRET_KEY = os.getenv("API_SECRET_KEY") # Add this to your .env file
+API_SECRET_KEY = os.getenv("API_SECRET_KEY")  # Add this to your .env file
 
+# Fixed IDs for /aa command
+AA_CHANNEL_ID = 1414791179941314580
+ANOMALY_ACTORS_ROLE_ID = 1414796930172715028
 
 # --- Bot Setup ---
 # Define the intents your bot needs.
 intents = discord.Intents.default()
 intents.members = True
-intents.message_content = True # Added privileged intent
+intents.message_content = True  # Added privileged intent
 
 class MD_BOT(commands.Bot):
     def __init__(self):
@@ -96,13 +99,13 @@ class MD_BOT(commands.Bot):
         app.router.add_post('/roblox', self.roblox_handler)
         runner = web.AppRunner(app)
         await runner.setup()
-        site = web.TCPSite(runner, '0.0.0.0', 8080) # Railway will use port 8080
+        site = web.TCPSite(runner, '0.0.0.0', 8080)  # Railway will use port 8080
         await site.start()
         print("Web server for Roblox integration is running.")
 
     async def roblox_handler(self, request):
         if request.headers.get("X-Secret-Key") != API_SECRET_KEY:
-            return web.Response(status=401) # Unauthorized
+            return web.Response(status=401)  # Unauthorized
 
         data = await request.json()
         roblox_id = data.get("robloxId")
@@ -409,6 +412,64 @@ async def meme(interaction: discord.Interaction):
         except Exception as e:
             await interaction.followup.send("An error occurred while fetching a meme.", ephemeral=True)
             print(f"Meme command error: {e}")
+
+# --- NEW: /aa command (Anomaly Actors ping) ---
+@bot.tree.command(name="aa", description="Ping Anomaly Actors to get on-site for a checkup.")
+@discord.app_commands.checks.has_role(MANAGEMENT_ROLE_ID)  # Only management can use
+@discord.app_commands.checks.cooldown(1, 300.0, key=discord.app_commands.BucketType.user)  # 5 min per-user cooldown
+async def aa(interaction: discord.Interaction, note: str | None = None):
+    """
+    Pings the Anomaly Actors role in the specified channel to get on-site for a checkup.
+    Optional 'note' lets the caller add a short extra message.
+    """
+    target_channel = bot.get_channel(AA_CHANNEL_ID)
+    if not target_channel:
+        await interaction.response.send_message("Could not find the AA announcement channel.", ephemeral=True)
+        return
+
+    role = interaction.guild.get_role(ANOMALY_ACTORS_ROLE_ID)
+    if not role:
+        await interaction.response.send_message("Could not find the Anomaly Actors role.", ephemeral=True)
+        return
+
+    title = "🧪 Anomaly Actors Checkup Call"
+    body_lines = [
+        f"{role.mention}, please get on-site for a quick **Anomaly Actors checkup**.",
+        "Check the radio for further instructions."
+    ]
+    if note:
+        body_lines.append(f"\n**Note:** {note}")
+
+    embed = discord.Embed(
+        title=title,
+        description="\n".join(body_lines),
+        color=discord.Color.purple(),
+        timestamp=datetime.datetime.now(datetime.timezone.utc)
+    )
+    embed.set_footer(text=f"Requested by {interaction.user.display_name}")
+
+    await target_channel.send(
+        content=f"{role.mention}",
+        embed=embed,
+        allowed_mentions=discord.AllowedMentions(roles=True)
+    )
+    await interaction.response.send_message("Anomaly Actors have been pinged for a checkup.", ephemeral=True)
+
+@aa.error
+async def aa_error(interaction: discord.Interaction, error: discord.app_commands.AppCommandError):
+    if isinstance(error, discord.app_commands.MissingRole):
+        await interaction.response.send_message("You don’t have permission to use this command.", ephemeral=True)
+    elif isinstance(error, discord.app_commands.CommandOnCooldown):
+        retry_in = int(error.retry_after)
+        minutes, seconds = divmod(retry_in, 60)
+        pretty = f"{minutes}m {seconds}s" if minutes else f"{seconds}s"
+        await interaction.response.send_message(
+            f"⏳ You can use this command again in **{pretty}**.",
+            ephemeral=True
+        )
+    else:
+        await interaction.response.send_message("An unexpected error occurred.", ephemeral=True)
+        print(f"/aa error: {error}")
 
 # --- Weekly Task Checking ---
 @tasks.loop(time=datetime.time(hour=4, minute=0, tzinfo=datetime.timezone.utc))
