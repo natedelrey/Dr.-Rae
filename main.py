@@ -7,7 +7,8 @@ import random
 import aiohttp
 import asyncpg
 from aiohttp import web
-from discord import app_commands, BucketType  # <-- FIX: import BucketType here
+from discord import app_commands
+from discord.ext.commands import BucketType  # <-- correct place for BucketType
 
 # --- Configuration ---
 # Load environment variables from a .env file
@@ -417,7 +418,7 @@ async def meme(interaction: discord.Interaction):
 # --- NEW: /aa command (Anomaly Actors ping) ---
 @bot.tree.command(name="aa", description="Ping Anomaly Actors to get on-site for a checkup.")
 @app_commands.checks.has_role(MANAGEMENT_ROLE_ID)  # Only management can use
-@app_commands.checks.cooldown(1, 300.0, key=BucketType.user)  # <-- FIX: use BucketType.user
+@app_commands.checks.cooldown(1, 300.0, key=BucketType.user)  # 5 min per-user cooldown
 async def aa(interaction: discord.Interaction, note: str | None = None):
     """
     Pings the Anomaly Actors role in the specified channel to get on-site for a checkup.
