@@ -8,7 +8,7 @@ import aiohttp
 import asyncpg
 from aiohttp import web
 from discord import app_commands
-from discord.ext.commands import BucketType  # correct place for BucketType
+# NOTE: Removed BucketType import; use a callable key with Interaction
 
 # --- Configuration ---
 # Load environment variables from a .env file
@@ -268,7 +268,7 @@ async def verify(interaction: discord.Interaction, roblox_username: str):
             if resp.status == 200:
                 data = await resp.json()
                 if data["data"]:
-                    user_data = data["data"][0]
+                    user_data = data["data'][0]
                     roblox_id = user_data["id"]
                     roblox_name = user_data["name"]
                     async with bot.db_pool.acquire() as connection:
@@ -473,7 +473,7 @@ async def meme(interaction: discord.Interaction):
 # --- NEW: /aa command ---
 @bot.tree.command(name="aa", description="Ping Anomaly Actors to get on-site for a checkup.")
 @app_commands.checks.has_role(MANAGEMENT_ROLE_ID)  # Only management can use
-@app_commands.checks.cooldown(1, 300.0, key=BucketType.user)  # 5 min per-user cooldown
+@app_commands.checks.cooldown(1, 300.0, key=lambda i: i.user.id)  # 5 min per-user cooldown (works with Interaction)
 async def aa(interaction: discord.Interaction, note: str | None = None):
     target_channel = bot.get_channel(AA_CHANNEL_ID)
     if not target_channel:
