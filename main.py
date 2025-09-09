@@ -7,6 +7,7 @@ import random
 import aiohttp
 import asyncpg
 from aiohttp import web
+from discord import app_commands, BucketType  # <-- FIX: import BucketType here
 
 # --- Configuration ---
 # Load environment variables from a .env file
@@ -257,15 +258,15 @@ async def verify(interaction: discord.Interaction, roblox_username: str):
 
 # Announce Command
 @bot.tree.command(name="announce", description="Make an announcement in the designated channel.")
-@discord.app_commands.checks.has_role(ANNOUNCEMENT_ROLE_ID)
-@discord.app_commands.choices(color=[
-    discord.app_commands.Choice(name="Blue", value="blue"),
-    discord.app_commands.Choice(name="Green", value="green"),
-    discord.app_commands.Choice(name="Red", value="red"),
-    discord.app_commands.Choice(name="Yellow", value="yellow"),
-    discord.app_commands.Choice(name="Purple", value="purple"),
-    discord.app_commands.Choice(name="Orange", value="orange"),
-    discord.app_commands.Choice(name="Gold", value="gold"),
+@app_commands.checks.has_role(ANNOUNCEMENT_ROLE_ID)
+@app_commands.choices(color=[
+    app_commands.Choice(name="Blue", value="blue"),
+    app_commands.Choice(name="Green", value="green"),
+    app_commands.Choice(name="Red", value="red"),
+    app_commands.Choice(name="Yellow", value="yellow"),
+    app_commands.Choice(name="Purple", value="purple"),
+    app_commands.Choice(name="Orange", value="orange"),
+    app_commands.Choice(name="Gold", value="gold"),
 ])
 async def announce(interaction: discord.Interaction, title: str, message: str, color: str = "blue"):
     announcement_channel = bot.get_channel(ANNOUNCEMENT_CHANNEL_ID)
@@ -278,8 +279,8 @@ async def announce(interaction: discord.Interaction, title: str, message: str, c
     await interaction.response.send_message("Announcement sent successfully!", ephemeral=True)
 
 @announce.error
-async def announce_error(interaction: discord.Interaction, error: discord.app_commands.AppCommandError):
-    if isinstance(error, discord.app_commands.MissingRole):
+async def announce_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
+    if isinstance(error, app_commands.MissingRole):
         await interaction.response.send_message(f"Sorry, you don't have the required role.", ephemeral=True)
     else:
         await interaction.response.send_message("An error occurred.", ephemeral=True)
@@ -323,7 +324,7 @@ async def leaderboard(interaction: discord.Interaction):
 
 # Remove Last Log Command
 @bot.tree.command(name="removelastlog", description="Removes the last logged task for a member.")
-@discord.app_commands.checks.has_role(MANAGEMENT_ROLE_ID)
+@app_commands.checks.has_role(MANAGEMENT_ROLE_ID)
 async def removelastlog(interaction: discord.Interaction, member: discord.Member):
     member_id = member.id
     async with bot.db_pool.acquire() as connection:
@@ -338,8 +339,8 @@ async def removelastlog(interaction: discord.Interaction, member: discord.Member
     await interaction.response.send_message(f"Removed last task for {member.mention}: '{last_log['task']}'. They now have {new_count} tasks.", ephemeral=True)
 
 @removelastlog.error
-async def removelastlog_error(interaction: discord.Interaction, error: discord.app_commands.AppCommandError):
-    if isinstance(error, discord.app_commands.MissingRole):
+async def removelastlog_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
+    if isinstance(error, app_commands.MissingRole):
         await interaction.response.send_message("You do not have the required role.", ephemeral=True)
     else:
         await interaction.response.send_message("An error occurred.", ephemeral=True)
@@ -347,7 +348,7 @@ async def removelastlog_error(interaction: discord.Interaction, error: discord.a
 
 # Welcome Command
 @bot.tree.command(name="welcome", description="Sends the official welcome message.")
-@discord.app_commands.checks.has_role(MANAGEMENT_ROLE_ID)
+@app_commands.checks.has_role(MANAGEMENT_ROLE_ID)
 async def welcome(interaction: discord.Interaction):
     welcome_message = (
         "Welcome to the Medical Department! We're super excited to have you join us. 😊 We know you're gonna be a great addition to the department! 🩺\n\n"
@@ -362,8 +363,8 @@ async def welcome(interaction: discord.Interaction):
     await interaction.response.send_message("Welcome message sent!", ephemeral=True)
 
 @welcome.error
-async def welcome_error(interaction: discord.Interaction, error: discord.app_commands.AppCommandError):
-    if isinstance(error, discord.app_commands.MissingRole):
+async def welcome_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
+    if isinstance(error, app_commands.MissingRole):
         await interaction.response.send_message("You do not have the required role.", ephemeral=True)
     else:
         await interaction.response.send_message("An error occurred.", ephemeral=True)
@@ -371,7 +372,7 @@ async def welcome_error(interaction: discord.Interaction, error: discord.app_com
 
 # DM Command
 @bot.tree.command(name="dm", description="Sends a direct message to a member.")
-@discord.app_commands.checks.has_role(MANAGEMENT_ROLE_ID)
+@app_commands.checks.has_role(MANAGEMENT_ROLE_ID)
 async def dm(interaction: discord.Interaction, member: discord.Member, title: str, message: str):
     if member.bot:
         await interaction.response.send_message("You can't send messages to bots!", ephemeral=True)
@@ -387,8 +388,8 @@ async def dm(interaction: discord.Interaction, member: discord.Member, title: st
         print(f"DM command error: {e}")
 
 @dm.error
-async def dm_error(interaction: discord.Interaction, error: discord.app_commands.AppCommandError):
-    if isinstance(error, discord.app_commands.MissingRole):
+async def dm_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
+    if isinstance(error, app_commands.MissingRole):
         await interaction.response.send_message("You do not have the required role.", ephemeral=True)
     else:
         await interaction.response.send_message("An error occurred.", ephemeral=True)
@@ -415,8 +416,8 @@ async def meme(interaction: discord.Interaction):
 
 # --- NEW: /aa command (Anomaly Actors ping) ---
 @bot.tree.command(name="aa", description="Ping Anomaly Actors to get on-site for a checkup.")
-@discord.app_commands.checks.has_role(MANAGEMENT_ROLE_ID)  # Only management can use
-@discord.app_commands.checks.cooldown(1, 300.0, key=discord.app_commands.BucketType.user)  # 5 min per-user cooldown
+@app_commands.checks.has_role(MANAGEMENT_ROLE_ID)  # Only management can use
+@app_commands.checks.cooldown(1, 300.0, key=BucketType.user)  # <-- FIX: use BucketType.user
 async def aa(interaction: discord.Interaction, note: str | None = None):
     """
     Pings the Anomaly Actors role in the specified channel to get on-site for a checkup.
@@ -456,10 +457,10 @@ async def aa(interaction: discord.Interaction, note: str | None = None):
     await interaction.response.send_message("Anomaly Actors have been pinged for a checkup.", ephemeral=True)
 
 @aa.error
-async def aa_error(interaction: discord.Interaction, error: discord.app_commands.AppCommandError):
-    if isinstance(error, discord.app_commands.MissingRole):
+async def aa_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
+    if isinstance(error, app_commands.MissingRole):
         await interaction.response.send_message("You don’t have permission to use this command.", ephemeral=True)
-    elif isinstance(error, discord.app_commands.CommandOnCooldown):
+    elif isinstance(error, app_commands.CommandOnCooldown):
         retry_in = int(error.retry_after)
         minutes, seconds = divmod(retry_in, 60)
         pretty = f"{minutes}m {seconds}s" if minutes else f"{seconds}s"
