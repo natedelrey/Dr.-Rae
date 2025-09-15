@@ -1,4 +1,3 @@
-# === main.py (Part 1/3) ===
 import discord
 from discord.ext import commands, tasks
 import os
@@ -32,11 +31,11 @@ ORIENTATION_ALERT_CHANNEL_ID = int(os.getenv("ORIENTATION_ALERT_CHANNEL_ID"))  #
 DATABASE_URL = os.getenv("DATABASE_URL")
 API_SECRET_KEY = os.getenv("API_SECRET_KEY")  # for /roblox webhook auth
 
-# Command logging + Roblox service (internal Railway URL OK)
+# Command logging + Roblox service
 COMMAND_LOG_CHANNEL_ID = int(os.getenv("COMMAND_LOG_CHANNEL_ID", "1416965696230789150"))
-ROBLOX_REMOVE_URL = os.getenv("ROBLOX_REMOVE_URL") or None      # e.g., https://md-remove-member.up.railway.app/remove  OR  http://md-remove-member.railway.internal:8080/remove
+ROBLOX_REMOVE_URL = os.getenv("ROBLOX_REMOVE_URL") or None      # e.g., https://your-service/remove
 ROBLOX_REMOVE_SECRET = os.getenv("ROBLOX_REMOVE_SECRET") or None
-ROBLOX_SERVICE_BASE = os.getenv("ROBLOX_SERVICE_BASE") or None   # e.g., https://md-remove-member.up.railway.app  OR  http://md-remove-member.railway.internal:8080
+ROBLOX_SERVICE_BASE = os.getenv("ROBLOX_SERVICE_BASE") or None  # e.g., https://your-service
 
 # Rank manager role (can run /rank)
 RANK_MANAGER_ROLE_ID = 1405979816120942702
@@ -82,23 +81,6 @@ def human_remaining(delta: datetime.timedelta) -> str:
     if hours: parts.append(f"{hours}h")
     if mins and not days: parts.append(f"{mins}m")
     return " ".join(parts) if parts else "under 1m"
-
-# --- URL normalization to avoid env mistakes (missing scheme/trailing slash/quotes) ---
-def _normalize_url_base(val: str | None) -> str | None:
-    if not val:
-        return None
-    base = val.strip().strip('"').strip("'")
-    if not base:
-        return None
-    if not (base.startswith("http://") or base.startswith("https://")):
-        # Public domains should be https; internal Railway service-discovery should be http with :8080
-        base = "https://" + base
-    if base.endswith("/"):
-        base = base[:-1]
-    return base
-
-ROBLOX_SERVICE_BASE = _normalize_url_base(ROBLOX_SERVICE_BASE)
-ROBLOX_REMOVE_URL   = _normalize_url_base(ROBLOX_REMOVE_URL)
 
 class MD_BOT(commands.Bot):
     def __init__(self):
@@ -171,14 +153,12 @@ class MD_BOT(commands.Bot):
                 );
             ''')
 
-            # --- MIGRATIONS: ensure new columns exist even if table was created earlier ---
+            # Migrations to ensure new columns
             await connection.execute("ALTER TABLE orientations ADD COLUMN IF NOT EXISTS passed_at TIMESTAMPTZ;")
             await connection.execute("ALTER TABLE orientations ADD COLUMN IF NOT EXISTS warned_5d BOOLEAN DEFAULT FALSE;")
             await connection.execute("ALTER TABLE orientations ADD COLUMN IF NOT EXISTS expired_handled BOOLEAN DEFAULT FALSE;")
 
         print("Database tables are ready.")
-        print(f"ROBLOX_SERVICE_BASE = {ROBLOX_SERVICE_BASE}")
-        print(f"ROBLOX_REMOVE_URL   = {ROBLOX_REMOVE_URL}")
 
         # Sync slash commands
         try:
@@ -306,14 +286,14 @@ async def try_remove_from_roblox(discord_id: int) -> bool:
                     print(f"Roblox removal failed: {resp.status} {text}")
                 return ok
     except Exception as e:
-        print(f"Roblox removal call failed: {type(e).__name__}: {e}")
+        print(f"Roblox removal call failed: {e}")
         return False
 
 async def fetch_group_ranks():
     """Return list of {'id','name','rank'} from the Node service."""
     if not ROBLOX_SERVICE_BASE or not ROBLOX_REMOVE_SECRET:
         return []
-    url = f"{ROBLOX_SERVICE_BASE}/ranks"
+    url = ROBLOX_SERVICE_BASE.rstrip('/') + '/ranks'
     try:
         async with aiohttp.ClientSession() as session:
             async with session.get(url, headers={"X-Secret-Key": ROBLOX_REMOVE_SECRET}, timeout=15) as resp:
@@ -324,13 +304,13 @@ async def fetch_group_ranks():
                     print(f"/ranks failed: {resp.status} {await resp.text()}")
                     return []
     except Exception as e:
-        print(f"fetch_group_ranks error: {type(e).__name__}: {e} (url={url})")
+        print(f"fetch_group_ranks error: {e}")
         return []
 
 async def set_group_rank(roblox_id: int, role_id: int = None, rank_number: int = None) -> bool:
     if not ROBLOX_SERVICE_BASE or not ROBLOX_REMOVE_SECRET:
         return False
-    url = f"{ROBLOX_SERVICE_BASE}/set-rank"
+    url = ROBLOX_SERVICE_BASE.rstrip('/') + '/set-rank'
     body = {"robloxId": int(roblox_id)}
     if role_id is not None:
         body["roleId"] = int(role_id)
@@ -345,10 +325,8 @@ async def set_group_rank(roblox_id: int, role_id: int = None, rank_number: int =
                     print(f"/set-rank failed: {resp.status} {await resp.text()}")
                     return False
     except Exception as e:
-        print(f"set_group_rank error: {type(e).__name__}: {e} (url={url})")
+        print(f"set_group_rank error: {e}")
         return False
-# === main.py (Part 2/3) ===
-
 # === Modals ===
 class AnnouncementForm(discord.ui.Modal, title='Send Announcement'):
     def __init__(self, color_obj: discord.Color):
@@ -451,33 +429,41 @@ async def on_member_update(before: discord.Member, after: discord.Member):
                 after.id, assigned, deadline
             )
 
-# === Command usage logging ===
+# === Simple, compact command logging ===
+def _shorten(text: str, max_len: int = 120) -> str:
+    return text if len(text) <= max_len else text[:max_len-1] + "…"
+
 @bot.event
 async def on_interaction(interaction: discord.Interaction):
-    try:
-        if interaction.type == discord.InteractionType.application_command and COMMAND_LOG_CHANNEL_ID:
-            ch = bot.get_channel(COMMAND_LOG_CHANNEL_ID)
-            if ch:
-                user = interaction.user
-                data = interaction.data or {}
-                cmd = data.get("name", "unknown")
-                options = data.get("options", []) or []
-                args_str = ", ".join(f"{opt.get('name')}={opt.get('value')}" for opt in options)
-                embed = discord.Embed(
-                    title="Slash Command Invoked",
-                    description=f"/{cmd}" + (f" {args_str}" if args_str else ""),
-                    color=discord.Color.dark_gray(),
-                    timestamp=utcnow()
-                )
-                if hasattr(user, "avatar") and user.avatar:
-                    embed.set_author(name=f"{user} ({user.id})", icon_url=user.avatar.url)
-                else:
-                    embed.set_author(name=f"{user} ({user.id})")
-                if interaction.guild and interaction.channel:
-                    embed.set_footer(text=f"Guild: {interaction.guild.name} • Channel: #{getattr(interaction.channel, 'name', 'dm')}")
-                await ch.send(embed=embed)
-    except Exception as e:
-        print(f"command log error: {e}")
+    # Only log when a slash-command is invoked; keep it compact & readable
+    if interaction.type != discord.InteractionType.application_command:
+        return
+    ch = bot.get_channel(COMMAND_LOG_CHANNEL_ID) if COMMAND_LOG_CHANNEL_ID else None
+    if not ch:
+        return
+
+    data = interaction.data or {}
+    cmd = data.get("name", "unknown")
+    opts = data.get("options") or []
+    parts = []
+    for o in opts:
+        n = o.get("name")
+        v = o.get("value")
+        parts.append(f"{n}={v}")
+    args_str = _shorten(", ".join(parts), 100) if parts else ""
+
+    where = f"#{getattr(interaction.channel, 'name', 'dm')}" if interaction.guild else "DM"
+    by = f"{interaction.user} ({interaction.user.id})"
+
+    embed = discord.Embed(
+        title="Command Used",
+        description=f"`/{cmd}`" + (f" — {args_str}" if args_str else ""),
+        color=discord.Color.dark_gray(),
+        timestamp=utcnow()
+    )
+    embed.add_field(name="By", value=by, inline=False)
+    embed.add_field(name="In", value=where, inline=False)
+    await ch.send(embed=embed)
 
 @bot.tree.error
 async def global_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
@@ -716,14 +702,6 @@ async def removelastlog(interaction: discord.Interaction, member: discord.Member
         ephemeral=True
     )
 
-@removelastlog.error
-async def removelastlog_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
-    if isinstance(error, app_commands.MissingRole):
-        await interaction.response.send_message("You do not have the required role.", ephemeral=True)
-    else:
-        await interaction.response.send_message("An error occurred.", ephemeral=True)
-        print(error)
-
 # Welcome
 @bot.tree.command(name="welcome", description="Sends the official welcome message.")
 @app_commands.checks.has_role(MANAGEMENT_ROLE_ID)
@@ -740,15 +718,6 @@ async def welcome(interaction: discord.Interaction):
     embed.set_footer(text="Best,\nThe Medical Department Management Team")
     await interaction.channel.send(embed=embed)
     await interaction.response.send_message("Welcome message sent!", ephemeral=True)
-
-@welcome.error
-async def welcome_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
-    if isinstance(error, app_commands.MissingRole):
-        await interaction.response.send_message("You do not have the required role.", ephemeral=True)
-    else:
-        await interaction.response.send_message("An error occurred.", ephemeral=True)
-        print(error)
-
 # DM
 @bot.tree.command(name="dm", description="Sends a direct message to a member.")
 @app_commands.checks.has_role(MANAGEMENT_ROLE_ID)
@@ -809,7 +778,6 @@ async def aa(interaction: discord.Interaction, note: str | None = None):
         allowed_mentions=discord.AllowedMentions(roles=True)
     )
     await interaction.response.send_message("Anomaly Actors have been pinged for a checkup.", ephemeral=True)
-# === main.py (Part 3/3) ===
 
 # Orientation commands
 @bot.tree.command(name="passedorientation", description="Mark a member as having passed orientation.")
@@ -986,7 +954,7 @@ async def check_weekly_tasks():
 async def before_check():
     await bot.wait_until_ready()
 
-# Orientation 5-day warning + overdue enforcement
+# Orientation 5-day warning + overdue enforcement (kicks on expiry)
 @tasks.loop(minutes=30)
 async def orientation_reminder_loop():
     try:
@@ -1086,22 +1054,7 @@ async def orientation_reminder_loop():
 async def before_orientation_loop():
     await bot.wait_until_ready()
 
-# --- /rank autocomplete helper ---
-async def group_role_autocomplete(interaction: discord.Interaction, current: str):
-    current_lower = (current or "").lower()
-    roles = await fetch_group_ranks()
-    if not roles:
-        return []
-    out = []
-    for r in roles:
-        name = r.get('name', '')
-        if not current_lower or name.lower().startswith(current_lower):
-            out.append(app_commands.Choice(name=name, value=name))
-        if len(out) >= 25:
-            break
-    return out
-
-# /rank with autocomplete (requires role id in RANK_MANAGER_ROLE_ID)
+# --- RANK (removes old rank roles, assigns the new one) ---
 @bot.tree.command(
     name="rank",
     description="(Rank Manager) Set a member's Roblox/Discord rank to a group role."
@@ -1143,13 +1096,14 @@ async def rank(
         await interaction.response.send_message("Failed to set Roblox rank (service error).", ephemeral=True)
         return
 
-    # Store in DB
-    async with bot.db_pool.acquire() as conn:
-        await conn.execute(
-            "INSERT INTO member_ranks (discord_id, rank, set_by, set_at) VALUES ($1, $2, $3, $4) "
-            "ON CONFLICT (discord_id) DO UPDATE SET rank = EXCLUDED.rank, set_by = EXCLUDED.set_by, set_at = EXCLUDED.set_at",
-            member.id, target['name'], interaction.user.id, utcnow()
-        )
+    # Remove any existing Discord roles whose names match ANY Roblox group role names (old ranks)
+    rank_names_lower = {r.get('name','').lower() for r in ranks}
+    roles_to_remove = [role for role in member.roles if role.name.lower() in rank_names_lower and role.name.lower() != target['name'].lower()]
+    try:
+        if roles_to_remove:
+            await member.remove_roles(*roles_to_remove, reason=f"Replacing with rank {target['name']}")
+    except Exception as e:
+        print(f"/rank remove old roles error: {e}")
 
     # Assign matching Discord role if present
     assigned_role = None
@@ -1163,22 +1117,27 @@ async def rank(
         print(f"/rank role assign error: {e}")
 
     msg = f"Set **Roblox rank** for {member.mention} to **{target['name']}**."
+    if roles_to_remove:
+        msg += f" Removed {len(roles_to_remove)} old rank role(s)."
     if assigned_role:
-        msg += f" Also assigned Discord role **{assigned_role.name}**."
+        msg += f" Assigned Discord role **{assigned_role.name}**."
     await interaction.response.send_message(msg, ephemeral=True)
 
-# Attach autocomplete to the 'group_role' parameter
+# Autocomplete for the rank name (uses group roles from the service)
 @rank.autocomplete('group_role')
 async def group_role_autocomplete_cb(interaction: discord.Interaction, current: str):
-    return await group_role_autocomplete(interaction, current)
-
-@rank.error
-async def rank_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
-    if isinstance(error, app_commands.MissingRole):
-        await interaction.response.send_message("You don’t have permission to use this command.", ephemeral=True)
-    else:
-        await interaction.response.send_message("An error occurred running /rank.", ephemeral=True)
-        print(f"/rank error: {error}")
+    current_lower = (current or "").lower()
+    roles = await fetch_group_ranks()
+    if not roles:
+        return []
+    out = []
+    for r in roles:
+        name = r.get('name', '')
+        if not current_lower or name.lower().startswith(current_lower):
+            out.append(app_commands.Choice(name=name, value=name))
+        if len(out) >= 25:
+            break
+    return out
 
 # === Run ===
 if __name__ == "__main__":
