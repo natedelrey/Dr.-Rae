@@ -1127,20 +1127,87 @@ async def rank(interaction: discord.Interaction, member: discord.Member, rank_na
         msg += f" Also assigned Discord role **{assigned_role.name}**."
     await interaction.response.send_message(msg, ephemeral=True)
 
-async def rank_autocomplete(interaction: discord.Interaction, current: str):
+# === NEW: /rank with autocomplete (requires role id 1405979816120942702) ===
+
+# Autocomplete callback MUST be a coroutine function
+async def rank_name_autocomplete(interaction: discord.Interaction, current: str):
     current_lower = (current or "").lower()
     roles = await fetch_group_ranks()
     if not roles:
         return []
-    # Return up to 25 suggestions (Discord limit)
     suggestions = []
     for r in roles:
-        name = r.get('name','')
+        name = r.get('name', '')
         if not current_lower or name.lower().startswith(current_lower):
             suggestions.append(app_commands.Choice(name=name, value=name))
         if len(suggestions) >= 25:
             break
     return suggestions
+
+@bot.tree.command(
+    name="rank",
+    description="(Rank Manager) Set a member's Roblox/Discord rank to a group role."
+)
+@app_commands.checks.has_role(RANK_MANAGER_ROLE_ID)
+@app_commands.autocomplete(rank_name=rank_name_autocomplete)  # <-- pass the coroutine directly
+async def rank(
+    interaction: discord.Interaction,
+    member: discord.Member,
+    rank_name: str
+):
+    # Resolve roblox_id
+    async with bot.db_pool.acquire() as conn:
+        roblox_id = await conn.fetchval(
+            "SELECT roblox_id FROM roblox_verification WHERE discord_id = $1",
+            member.id
+        )
+    if not roblox_id:
+        await interaction.response.send_message(
+            f"{member.display_name} hasn’t linked a Roblox account with `/verify` yet.",
+            ephemeral=True
+        )
+        return
+
+    ranks = await fetch_group_ranks()
+    if not ranks:
+        await interaction.response.send_message("Couldn’t fetch Roblox group ranks.", ephemeral=True)
+        return
+
+    # Find role by name (case-insensitive)
+    target = next((r for r in ranks if r.get('name', '').lower() == rank_name.lower()), None)
+    if not target:
+        await interaction.response.send_message("That rank wasn’t found. Try typing to see suggestions.", ephemeral=True)
+        return
+
+    # Set Roblox rank via service
+    ok = await set_group_rank(int(roblox_id), role_id=int(target['id']))
+    if not ok:
+        await interaction.response.send_message("Failed to set Roblox rank (service error).", ephemeral=True)
+        return
+
+    # Store in DB
+    async with bot.db_pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO member_ranks (discord_id, rank, set_by, set_at) VALUES ($1, $2, $3, $4) "
+            "ON CONFLICT (discord_id) DO UPDATE SET rank = EXCLUDED.rank, set_by = EXCLUDED.set_by, set_at = EXCLUDED.set_at",
+            member.id, target['name'], interaction.user.id, utcnow()
+        )
+
+    # Assign matching Discord role if present
+    assigned_role = None
+    try:
+        for role in interaction.guild.roles:
+            if role.name.lower() == target['name'].lower():
+                await member.add_roles(role, reason=f"Rank set via /rank by {interaction.user}")
+                assigned_role = role
+                break
+    except Exception as e:
+        print(f"/rank role assign error: {e}")
+
+    msg = f"Set **Roblox rank** for {member.mention} to **{target['name']}**."
+    if assigned_role:
+        msg += f" Also assigned Discord role **{assigned_role.name}**."
+    await interaction.response.send_message(msg, ephemeral=True)
 
 @rank.error
 async def rank_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
