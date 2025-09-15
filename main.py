@@ -1144,16 +1144,16 @@ async def rank_name_autocomplete(interaction: discord.Interaction, current: str)
             break
     return suggestions
 
+# === /rank with post-attachment autocomplete (requires role id 1405979816120942702) ===
 @bot.tree.command(
     name="rank",
     description="(Rank Manager) Set a member's Roblox/Discord rank to a group role."
 )
 @app_commands.checks.has_role(RANK_MANAGER_ROLE_ID)
-@app_commands.autocomplete(rank_name=rank_name_autocomplete)  # <-- pass the coroutine directly
 async def rank(
     interaction: discord.Interaction,
     member: discord.Member,
-    rank_name: str
+    rank_name: str  # this will be autocompleted below
 ):
     # Resolve roblox_id
     async with bot.db_pool.acquire() as conn:
@@ -1168,13 +1168,14 @@ async def rank(
         )
         return
 
+    # Fetch ranks from the service
     ranks = await fetch_group_ranks()
     if not ranks:
         await interaction.response.send_message("Couldn’t fetch Roblox group ranks.", ephemeral=True)
         return
 
-    # Find role by name (case-insensitive)
-    target = next((r for r in ranks if r.get('name', '').lower() == rank_name.lower()), None)
+    # Match by name (case-insensitive)
+    target = next((r for r in ranks if r.get('name','').lower() == rank_name.lower()), None)
     if not target:
         await interaction.response.send_message("That rank wasn’t found. Try typing to see suggestions.", ephemeral=True)
         return
@@ -1208,6 +1209,22 @@ async def rank(
     if assigned_role:
         msg += f" Also assigned Discord role **{assigned_role.name}**."
     await interaction.response.send_message(msg, ephemeral=True)
+
+@rank.autocomplete('rank_name')
+async def rank_name_autocomplete_callback(interaction: discord.Interaction, current: str):
+    """Must be a coroutine function; returns up to 25 Choices."""
+    current_lower = (current or "").lower()
+    roles = await fetch_group_ranks()
+    if not roles:
+        return []
+    suggestions = []
+    for r in roles:
+        name = r.get('name', '')
+        if not current_lower or name.lower().startswith(current_lower):
+            suggestions.append(app_commands.Choice(name=name, value=name))
+        if len(suggestions) >= 25:
+            break
+    return suggestions
 
 @rank.error
 async def rank_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
