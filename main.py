@@ -35,8 +35,7 @@ API_SECRET_KEY = os.getenv("API_SECRET_KEY")  # for /roblox webhook auth
 COMMAND_LOG_CHANNEL_ID = int(os.getenv("COMMAND_LOG_CHANNEL_ID", "1416965696230789150"))
 ROBLOX_REMOVE_URL = os.getenv("ROBLOX_REMOVE_URL") or None      # e.g., http://md-remove-member.railway.internal/remove
 ROBLOX_REMOVE_SECRET = os.getenv("ROBLOX_REMOVE_SECRET") or None
-# New: base URL for ranks & set-rank (same host as remove, without the /remove path)
-# If you used the internal name, it's the same host.
+# Base URL for ranks & set-rank (same host as remove, without the /remove path)
 ROBLOX_SERVICE_BASE = os.getenv("ROBLOX_SERVICE_BASE") or None   # e.g., http://md-remove-member.railway.internal
 
 # Rank manager role (can run /rank)
@@ -695,7 +694,6 @@ async def removelastlog(interaction: discord.Interaction, member: discord.Member
         f"Removed last task for {member.mention}: '{last_log['task']}'. They now have {new_count} tasks.",
         ephemeral=True
     )
-
 @removelastlog.error
 async def removelastlog_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
     if isinstance(error, app_commands.MissingRole):
@@ -789,6 +787,7 @@ async def aa(interaction: discord.Interaction, note: str | None = None):
         allowed_mentions=discord.AllowedMentions(roles=True)
     )
     await interaction.response.send_message("Anomaly Actors have been pinged for a checkup.", ephemeral=True)
+
 # Orientation commands
 @bot.tree.command(name="passedorientation", description="Mark a member as having passed orientation.")
 @app_commands.checks.has_role(MANAGEMENT_ROLE_ID)
@@ -891,7 +890,7 @@ async def extendorientation(
         ephemeral=True
     )
 
-# Weekly task summary (filtered to department role) + reset
+# Weekly task summary (filtered to department role) + reset (but keep all-time logs)
 @tasks.loop(time=datetime.time(hour=4, minute=0, tzinfo=datetime.timezone.utc))
 async def check_weekly_tasks():
     if utcnow().weekday() != 6:  # Sunday UTC
@@ -956,8 +955,9 @@ async def check_weekly_tasks():
         footer_text=None
     )
 
+    # IMPORTANT: keep all-time task history (do not truncate task_logs)
     async with bot.db_pool.acquire() as conn:
-        await conn.execute("TRUNCATE TABLE weekly_tasks, task_logs, roblox_time, roblox_sessions")
+        await conn.execute("TRUNCATE TABLE weekly_tasks, roblox_time, roblox_sessions")
     print("Weekly tasks and time checked and reset.")
 
 @check_weekly_tasks.before_loop
@@ -1064,87 +1064,21 @@ async def orientation_reminder_loop():
 async def before_orientation_loop():
     await bot.wait_until_ready()
 
-# === NEW: /rank with autocomplete (requires role id 1405979816120942702) ===
-@bot.tree.command(name="rank", description="(Rank Manager) Set a member's Roblox/Discord rank to a group role.")
-@app_commands.checks.has_role(RANK_MANAGER_ROLE_ID)
-@app_commands.autocomplete(rank_name=lambda i, current: rank_autocomplete(i, current))
-async def rank(interaction: discord.Interaction, member: discord.Member, rank_name: str):
-    # Resolve roblox_id
-    async with bot.db_pool.acquire() as conn:
-        roblox_id = await conn.fetchval(
-            "SELECT roblox_id FROM roblox_verification WHERE discord_id = $1",
-            member.id
-        )
-    if not roblox_id:
-        await interaction.response.send_message(
-            f"{member.display_name} hasn’t linked a Roblox account with `/verify` yet.",
-            ephemeral=True
-        )
-        return
-
-    ranks = await fetch_group_ranks()
-    if not ranks:
-        await interaction.response.send_message("Couldn’t fetch Roblox group ranks.", ephemeral=True)
-        return
-
-    # Find role by name (case-insensitive)
-    target = None
-    for r in ranks:
-        if r.get('name','').lower() == rank_name.lower():
-            target = r
-            break
-    if not target:
-        await interaction.response.send_message("That rank wasn’t found. Try typing to see suggestions.", ephemeral=True)
-        return
-
-    # Set Roblox rank
-    ok = await set_group_rank(int(roblox_id), role_id=int(target['id']))
-    if not ok:
-        await interaction.response.send_message("Failed to set Roblox rank (service error).", ephemeral=True)
-        return
-
-    # Store in DB
-    async with bot.db_pool.acquire() as conn:
-        await conn.execute(
-            "INSERT INTO member_ranks (discord_id, rank, set_by, set_at) VALUES ($1, $2, $3, $4) "
-            "ON CONFLICT (discord_id) DO UPDATE SET rank = EXCLUDED.rank, set_by = EXCLUDED.set_by, set_at = EXCLUDED.set_at",
-            member.id, target['name'], interaction.user.id, utcnow()
-        )
-
-    # Assign matching Discord role if present
-    assigned_role = None
-    try:
-        for role in interaction.guild.roles:
-            if role.name.lower() == target['name'].lower():
-                await member.add_roles(role, reason=f"Rank set via /rank by {interaction.user}")
-                assigned_role = role
-                break
-    except Exception as e:
-        print(f"/rank role assign error: {e}")
-
-    msg = f"Set **Roblox rank** for {member.mention} to **{target['name']}**."
-    if assigned_role:
-        msg += f" Also assigned Discord role **{assigned_role.name}**."
-    await interaction.response.send_message(msg, ephemeral=True)
-
-# === NEW: /rank with autocomplete (requires role id 1405979816120942702) ===
-
-# Autocomplete callback MUST be a coroutine function
-async def rank_name_autocomplete(interaction: discord.Interaction, current: str):
+# === /rank with safe (async) autocomplete ===
+async def group_role_autocomplete(interaction: discord.Interaction, current: str):
     current_lower = (current or "").lower()
     roles = await fetch_group_ranks()
     if not roles:
         return []
-    suggestions = []
+    out = []
     for r in roles:
         name = r.get('name', '')
         if not current_lower or name.lower().startswith(current_lower):
-            suggestions.append(app_commands.Choice(name=name, value=name))
-        if len(suggestions) >= 25:
+            out.append(app_commands.Choice(name=name, value=name))
+        if len(out) >= 25:
             break
-    return suggestions
+    return out
 
-# === /rank with post-attachment autocomplete (requires role id 1405979816120942702) ===
 @bot.tree.command(
     name="rank",
     description="(Rank Manager) Set a member's Roblox/Discord rank to a group role."
@@ -1153,7 +1087,7 @@ async def rank_name_autocomplete(interaction: discord.Interaction, current: str)
 async def rank(
     interaction: discord.Interaction,
     member: discord.Member,
-    rank_name: str  # this will be autocompleted below
+    group_role: str
 ):
     # Resolve roblox_id
     async with bot.db_pool.acquire() as conn:
@@ -1175,7 +1109,7 @@ async def rank(
         return
 
     # Match by name (case-insensitive)
-    target = next((r for r in ranks if r.get('name','').lower() == rank_name.lower()), None)
+    target = next((r for r in ranks if r.get('name','').lower() == group_role.lower()), None)
     if not target:
         await interaction.response.send_message("That rank wasn’t found. Try typing to see suggestions.", ephemeral=True)
         return
@@ -1210,21 +1144,9 @@ async def rank(
         msg += f" Also assigned Discord role **{assigned_role.name}**."
     await interaction.response.send_message(msg, ephemeral=True)
 
-@rank.autocomplete('rank_name')
-async def rank_name_autocomplete_callback(interaction: discord.Interaction, current: str):
-    """Must be a coroutine function; returns up to 25 Choices."""
-    current_lower = (current or "").lower()
-    roles = await fetch_group_ranks()
-    if not roles:
-        return []
-    suggestions = []
-    for r in roles:
-        name = r.get('name', '')
-        if not current_lower or name.lower().startswith(current_lower):
-            suggestions.append(app_commands.Choice(name=name, value=name))
-        if len(suggestions) >= 25:
-            break
-    return suggestions
+@rank.autocomplete('group_role')
+async def group_role_autocomplete_cb(interaction: discord.Interaction, current: str):
+    return await group_role_autocomplete(interaction, current)
 
 @rank.error
 async def rank_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
