@@ -31,12 +31,15 @@ ORIENTATION_ALERT_CHANNEL_ID = int(os.getenv("ORIENTATION_ALERT_CHANNEL_ID"))  #
 DATABASE_URL = os.getenv("DATABASE_URL")
 API_SECRET_KEY = os.getenv("API_SECRET_KEY")  # for /roblox webhook auth
 
-# Command logging + (optional) Roblox removal service for expired orientations
+# Command logging + Roblox service (internal Railway URL OK)
 COMMAND_LOG_CHANNEL_ID = int(os.getenv("COMMAND_LOG_CHANNEL_ID", "1416965696230789150"))
-ROBLOX_REMOVE_URL = os.getenv("ROBLOX_REMOVE_URL") or None
+ROBLOX_REMOVE_URL = os.getenv("ROBLOX_REMOVE_URL") or None      # e.g., http://md-remove-member.railway.internal/remove
 ROBLOX_REMOVE_SECRET = os.getenv("ROBLOX_REMOVE_SECRET") or None
+# New: base URL for ranks & set-rank (same host as remove, without the /remove path)
+# If you used the internal name, it's the same host.
+ROBLOX_SERVICE_BASE = os.getenv("ROBLOX_SERVICE_BASE") or None   # e.g., http://md-remove-member.railway.internal
 
-# NEW: Rank manager role (can run /rank)
+# Rank manager role (can run /rank)
 RANK_MANAGER_ROLE_ID = 1405979816120942702
 
 # Misc
@@ -95,7 +98,7 @@ class MD_BOT(commands.Bot):
             print(f"Failed to connect to the database: {e}")
             return
 
-        # Schema
+        # Schema (create if missing)
         async with self.db_pool.acquire() as connection:
             await connection.execute('''
                 CREATE TABLE IF NOT EXISTS weekly_tasks (
@@ -143,7 +146,6 @@ class MD_BOT(commands.Bot):
                     expired_handled BOOLEAN DEFAULT FALSE
                 );
             ''')
-            # NEW: member_ranks table
             await connection.execute('''
                 CREATE TABLE IF NOT EXISTS member_ranks (
                     discord_id BIGINT PRIMARY KEY,
@@ -152,6 +154,11 @@ class MD_BOT(commands.Bot):
                     set_at TIMESTAMPTZ
                 );
             ''')
+
+            # --- MIGRATIONS: ensure new columns exist even if table was created earlier ---
+            await connection.execute("ALTER TABLE orientations ADD COLUMN IF NOT EXISTS passed_at TIMESTAMPTZ;")
+            await connection.execute("ALTER TABLE orientations ADD COLUMN IF NOT EXISTS warned_5d BOOLEAN DEFAULT FALSE;")
+            await connection.execute("ALTER TABLE orientations ADD COLUMN IF NOT EXISTS expired_handled BOOLEAN DEFAULT FALSE;")
 
         print("Database tables are ready.")
 
@@ -162,7 +169,7 @@ class MD_BOT(commands.Bot):
         except Exception as e:
             print(f"Failed to sync commands: {e}")
 
-        # Web server for Roblox integration
+        # Web server for Roblox integration (time tracking)
         app = web.Application()
         app.router.add_post('/roblox', self.roblox_handler)
         runner = web.AppRunner(app)
@@ -257,22 +264,18 @@ async def ensure_orientation_record(member: discord.Member):
                 member.id, assigned, deadline
             )
 
-# Optional Roblox removal service call (if configured)
+# Roblox service helpers
 async def try_remove_from_roblox(discord_id: int) -> bool:
-    """Calls your external service to remove the Roblox user from the MD group.
-    Looks up roblox_id from DB, and sends it along.
-    """
     if not ROBLOX_REMOVE_URL or not ROBLOX_REMOVE_SECRET:
         return False
     try:
-        # Look up roblox_id
         async with bot.db_pool.acquire() as conn:
             roblox_id = await conn.fetchval(
                 "SELECT roblox_id FROM roblox_verification WHERE discord_id = $1",
                 discord_id
             )
         if not roblox_id:
-            print(f"try_remove_from_roblox: no roblox_id for discord_id={discord_id}")
+            print(f"try_remove_from_roblox: no roblox_id for {discord_id}")
             return False
 
         async with aiohttp.ClientSession() as session:
@@ -286,6 +289,45 @@ async def try_remove_from_roblox(discord_id: int) -> bool:
                 return ok
     except Exception as e:
         print(f"Roblox removal call failed: {e}")
+        return False
+
+async def fetch_group_ranks():
+    """Return list of {'id','name','rank'} from the Node service."""
+    if not ROBLOX_SERVICE_BASE or not ROBLOX_REMOVE_SECRET:
+        return []
+    url = ROBLOX_SERVICE_BASE.rstrip('/') + '/ranks'
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, headers={"X-Secret-Key": ROBLOX_REMOVE_SECRET}, timeout=15) as resp:
+                if 200 <= resp.status < 300:
+                    data = await resp.json()
+                    return data.get('roles', [])
+                else:
+                    print(f"/ranks failed: {resp.status} {await resp.text()}")
+                    return []
+    except Exception as e:
+        print(f"fetch_group_ranks error: {e}")
+        return []
+
+async def set_group_rank(roblox_id: int, role_id: int = None, rank_number: int = None) -> bool:
+    if not ROBLOX_SERVICE_BASE or not ROBLOX_REMOVE_SECRET:
+        return False
+    url = ROBLOX_SERVICE_BASE.rstrip('/') + '/set-rank'
+    body = {"robloxId": int(roblox_id)}
+    if role_id is not None:
+        body["roleId"] = int(role_id)
+    if rank_number is not None:
+        body["rankNumber"] = int(rank_number)
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, json=body, headers={"X-Secret-Key": ROBLOX_REMOVE_SECRET, "Content-Type": "application/json"}, timeout=15) as resp:
+                if 200 <= resp.status < 300:
+                    return True
+                else:
+                    print(f"/set-rank failed: {resp.status} {await resp.text()}")
+                    return False
+    except Exception as e:
+        print(f"set_group_rank error: {e}")
         return False
 # === Modals ===
 class AnnouncementForm(discord.ui.Modal, title='Send Announcement'):
@@ -1022,13 +1064,43 @@ async def orientation_reminder_loop():
 async def before_orientation_loop():
     await bot.wait_until_ready()
 
-# === NEW: /rank (requires role id 1405979816120942702) ===
-@bot.tree.command(name="rank", description="(Rank Manager) Set a member's MD rank; assigns matching Discord role if it exists.")
+# === NEW: /rank with autocomplete (requires role id 1405979816120942702) ===
+@bot.tree.command(name="rank", description="(Rank Manager) Set a member's Roblox/Discord rank to a group role.")
 @app_commands.checks.has_role(RANK_MANAGER_ROLE_ID)
+@app_commands.autocomplete(rank_name=lambda i, current: rank_autocomplete(i, current))
 async def rank(interaction: discord.Interaction, member: discord.Member, rank_name: str):
-    rank_name = rank_name.strip()
-    if not rank_name:
-        await interaction.response.send_message("Please provide a non-empty rank name.", ephemeral=True)
+    # Resolve roblox_id
+    async with bot.db_pool.acquire() as conn:
+        roblox_id = await conn.fetchval(
+            "SELECT roblox_id FROM roblox_verification WHERE discord_id = $1",
+            member.id
+        )
+    if not roblox_id:
+        await interaction.response.send_message(
+            f"{member.display_name} hasn’t linked a Roblox account with `/verify` yet.",
+            ephemeral=True
+        )
+        return
+
+    ranks = await fetch_group_ranks()
+    if not ranks:
+        await interaction.response.send_message("Couldn’t fetch Roblox group ranks.", ephemeral=True)
+        return
+
+    # Find role by name (case-insensitive)
+    target = None
+    for r in ranks:
+        if r.get('name','').lower() == rank_name.lower():
+            target = r
+            break
+    if not target:
+        await interaction.response.send_message("That rank wasn’t found. Try typing to see suggestions.", ephemeral=True)
+        return
+
+    # Set Roblox rank
+    ok = await set_group_rank(int(roblox_id), role_id=int(target['id']))
+    if not ok:
+        await interaction.response.send_message("Failed to set Roblox rank (service error).", ephemeral=True)
         return
 
     # Store in DB
@@ -1036,30 +1108,39 @@ async def rank(interaction: discord.Interaction, member: discord.Member, rank_na
         await conn.execute(
             "INSERT INTO member_ranks (discord_id, rank, set_by, set_at) VALUES ($1, $2, $3, $4) "
             "ON CONFLICT (discord_id) DO UPDATE SET rank = EXCLUDED.rank, set_by = EXCLUDED.set_by, set_at = EXCLUDED.set_at",
-            member.id, rank_name, interaction.user.id, utcnow()
+            member.id, target['name'], interaction.user.id, utcnow()
         )
 
-    # Try to assign a Discord role with the same name (case-insensitive)
+    # Assign matching Discord role if present
     assigned_role = None
     try:
-        role_match = None
         for role in interaction.guild.roles:
-            if role.name.lower() == rank_name.lower():
-                role_match = role
+            if role.name.lower() == target['name'].lower():
+                await member.add_roles(role, reason=f"Rank set via /rank by {interaction.user}")
+                assigned_role = role
                 break
-        if role_match:
-            await member.add_roles(role_match, reason=f"Rank set via /rank by {interaction.user}")
-            assigned_role = role_match
     except Exception as e:
         print(f"/rank role assign error: {e}")
 
-    msg = f"Set {member.mention}'s rank to **{rank_name}**."
+    msg = f"Set **Roblox rank** for {member.mention} to **{target['name']}**."
     if assigned_role:
-        msg += f" (Assigned Discord role **{assigned_role.name}**)"
-    else:
-        msg += " (No matching Discord role found to assign.)"
-
+        msg += f" Also assigned Discord role **{assigned_role.name}**."
     await interaction.response.send_message(msg, ephemeral=True)
+
+async def rank_autocomplete(interaction: discord.Interaction, current: str):
+    current_lower = (current or "").lower()
+    roles = await fetch_group_ranks()
+    if not roles:
+        return []
+    # Return up to 25 suggestions (Discord limit)
+    suggestions = []
+    for r in roles:
+        name = r.get('name','')
+        if not current_lower or name.lower().startswith(current_lower):
+            suggestions.append(app_commands.Choice(name=name, value=name))
+        if len(suggestions) >= 25:
+            break
+    return suggestions
 
 @rank.error
 async def rank_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
