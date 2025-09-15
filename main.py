@@ -29,12 +29,15 @@ ORIENTATION_ALERT_CHANNEL_ID = int(os.getenv("ORIENTATION_ALERT_CHANNEL_ID"))  #
 
 # DB / API
 DATABASE_URL = os.getenv("DATABASE_URL")
-API_SECRET_KEY = os.getenv("API_SECRET_KEY")  # for /roblox endpoint auth
+API_SECRET_KEY = os.getenv("API_SECRET_KEY")  # for /roblox webhook auth
 
 # Command logging + (optional) Roblox removal service for expired orientations
 COMMAND_LOG_CHANNEL_ID = int(os.getenv("COMMAND_LOG_CHANNEL_ID", "1416965696230789150"))
 ROBLOX_REMOVE_URL = os.getenv("ROBLOX_REMOVE_URL") or None
 ROBLOX_REMOVE_SECRET = os.getenv("ROBLOX_REMOVE_SECRET") or None
+
+# NEW: Rank manager role (can run /rank)
+RANK_MANAGER_ROLE_ID = 1405979816120942702
 
 # Misc
 ACTIVITY_LOG_CHANNEL_ID = 1409646416829354095  # move to env if you prefer
@@ -138,6 +141,15 @@ class MD_BOT(commands.Bot):
                     passed_at TIMESTAMPTZ,
                     warned_5d BOOLEAN DEFAULT FALSE,
                     expired_handled BOOLEAN DEFAULT FALSE
+                );
+            ''')
+            # NEW: member_ranks table
+            await connection.execute('''
+                CREATE TABLE IF NOT EXISTS member_ranks (
+                    discord_id BIGINT PRIMARY KEY,
+                    rank TEXT,
+                    set_by BIGINT,
+                    set_at TIMESTAMPTZ
                 );
             ''')
 
@@ -247,14 +259,31 @@ async def ensure_orientation_record(member: discord.Member):
 
 # Optional Roblox removal service call (if configured)
 async def try_remove_from_roblox(discord_id: int) -> bool:
+    """Calls your external service to remove the Roblox user from the MD group.
+    Looks up roblox_id from DB, and sends it along.
+    """
     if not ROBLOX_REMOVE_URL or not ROBLOX_REMOVE_SECRET:
         return False
     try:
+        # Look up roblox_id
+        async with bot.db_pool.acquire() as conn:
+            roblox_id = await conn.fetchval(
+                "SELECT roblox_id FROM roblox_verification WHERE discord_id = $1",
+                discord_id
+            )
+        if not roblox_id:
+            print(f"try_remove_from_roblox: no roblox_id for discord_id={discord_id}")
+            return False
+
         async with aiohttp.ClientSession() as session:
             headers = {"X-Secret-Key": ROBLOX_REMOVE_SECRET, "Content-Type": "application/json"}
-            payload = {"discordId": discord_id, "action": "remove_from_group"}
+            payload = {"robloxId": int(roblox_id)}
             async with session.post(ROBLOX_REMOVE_URL, headers=headers, json=payload, timeout=15) as resp:
-                return 200 <= resp.status < 300
+                ok = 200 <= resp.status < 300
+                if not ok:
+                    text = await resp.text()
+                    print(f"Roblox removal failed: {resp.status} {text}")
+                return ok
     except Exception as e:
         print(f"Roblox removal call failed: {e}")
         return False
@@ -798,7 +827,7 @@ async def extendorientation(
             new_deadline, member.id
         )
 
-    # Log extension (to command log channel)
+    # Log extension
     if COMMAND_LOG_CHANNEL_ID:
         ch = bot.get_channel(COMMAND_LOG_CHANNEL_ID)
         if ch:
@@ -992,6 +1021,53 @@ async def orientation_reminder_loop():
 @orientation_reminder_loop.before_loop
 async def before_orientation_loop():
     await bot.wait_until_ready()
+
+# === NEW: /rank (requires role id 1405979816120942702) ===
+@bot.tree.command(name="rank", description="(Rank Manager) Set a member's MD rank; assigns matching Discord role if it exists.")
+@app_commands.checks.has_role(RANK_MANAGER_ROLE_ID)
+async def rank(interaction: discord.Interaction, member: discord.Member, rank_name: str):
+    rank_name = rank_name.strip()
+    if not rank_name:
+        await interaction.response.send_message("Please provide a non-empty rank name.", ephemeral=True)
+        return
+
+    # Store in DB
+    async with bot.db_pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO member_ranks (discord_id, rank, set_by, set_at) VALUES ($1, $2, $3, $4) "
+            "ON CONFLICT (discord_id) DO UPDATE SET rank = EXCLUDED.rank, set_by = EXCLUDED.set_by, set_at = EXCLUDED.set_at",
+            member.id, rank_name, interaction.user.id, utcnow()
+        )
+
+    # Try to assign a Discord role with the same name (case-insensitive)
+    assigned_role = None
+    try:
+        role_match = None
+        for role in interaction.guild.roles:
+            if role.name.lower() == rank_name.lower():
+                role_match = role
+                break
+        if role_match:
+            await member.add_roles(role_match, reason=f"Rank set via /rank by {interaction.user}")
+            assigned_role = role_match
+    except Exception as e:
+        print(f"/rank role assign error: {e}")
+
+    msg = f"Set {member.mention}'s rank to **{rank_name}**."
+    if assigned_role:
+        msg += f" (Assigned Discord role **{assigned_role.name}**)"
+    else:
+        msg += " (No matching Discord role found to assign.)"
+
+    await interaction.response.send_message(msg, ephemeral=True)
+
+@rank.error
+async def rank_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
+    if isinstance(error, app_commands.MissingRole):
+        await interaction.response.send_message("You don’t have permission to use this command.", ephemeral=True)
+    else:
+        await interaction.response.send_message("An error occurred running /rank.", ephemeral=True)
+        print(f"/rank error: {error}")
 
 # === Run ===
 if __name__ == "__main__":
