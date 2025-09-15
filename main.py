@@ -1,3 +1,4 @@
+# === main.py (Part 1/3) ===
 import discord
 from discord.ext import commands, tasks
 import os
@@ -33,10 +34,9 @@ API_SECRET_KEY = os.getenv("API_SECRET_KEY")  # for /roblox webhook auth
 
 # Command logging + Roblox service (internal Railway URL OK)
 COMMAND_LOG_CHANNEL_ID = int(os.getenv("COMMAND_LOG_CHANNEL_ID", "1416965696230789150"))
-ROBLOX_REMOVE_URL = os.getenv("ROBLOX_REMOVE_URL") or None      # e.g., http://md-remove-member.railway.internal/remove
+ROBLOX_REMOVE_URL = os.getenv("ROBLOX_REMOVE_URL") or None      # e.g., https://md-remove-member.up.railway.app/remove  OR  http://md-remove-member.railway.internal:8080/remove
 ROBLOX_REMOVE_SECRET = os.getenv("ROBLOX_REMOVE_SECRET") or None
-# Base URL for ranks & set-rank (same host as remove, without the /remove path)
-ROBLOX_SERVICE_BASE = os.getenv("ROBLOX_SERVICE_BASE") or None   # e.g., http://md-remove-member.railway.internal
+ROBLOX_SERVICE_BASE = os.getenv("ROBLOX_SERVICE_BASE") or None   # e.g., https://md-remove-member.up.railway.app  OR  http://md-remove-member.railway.internal:8080
 
 # Rank manager role (can run /rank)
 RANK_MANAGER_ROLE_ID = 1405979816120942702
@@ -82,6 +82,23 @@ def human_remaining(delta: datetime.timedelta) -> str:
     if hours: parts.append(f"{hours}h")
     if mins and not days: parts.append(f"{mins}m")
     return " ".join(parts) if parts else "under 1m"
+
+# --- URL normalization to avoid env mistakes (missing scheme/trailing slash/quotes) ---
+def _normalize_url_base(val: str | None) -> str | None:
+    if not val:
+        return None
+    base = val.strip().strip('"').strip("'")
+    if not base:
+        return None
+    if not (base.startswith("http://") or base.startswith("https://")):
+        # Public domains should be https; internal Railway service-discovery should be http with :8080
+        base = "https://" + base
+    if base.endswith("/"):
+        base = base[:-1]
+    return base
+
+ROBLOX_SERVICE_BASE = _normalize_url_base(ROBLOX_SERVICE_BASE)
+ROBLOX_REMOVE_URL   = _normalize_url_base(ROBLOX_REMOVE_URL)
 
 class MD_BOT(commands.Bot):
     def __init__(self):
@@ -160,6 +177,8 @@ class MD_BOT(commands.Bot):
             await connection.execute("ALTER TABLE orientations ADD COLUMN IF NOT EXISTS expired_handled BOOLEAN DEFAULT FALSE;")
 
         print("Database tables are ready.")
+        print(f"ROBLOX_SERVICE_BASE = {ROBLOX_SERVICE_BASE}")
+        print(f"ROBLOX_REMOVE_URL   = {ROBLOX_REMOVE_URL}")
 
         # Sync slash commands
         try:
@@ -287,14 +306,14 @@ async def try_remove_from_roblox(discord_id: int) -> bool:
                     print(f"Roblox removal failed: {resp.status} {text}")
                 return ok
     except Exception as e:
-        print(f"Roblox removal call failed: {e}")
+        print(f"Roblox removal call failed: {type(e).__name__}: {e}")
         return False
 
 async def fetch_group_ranks():
     """Return list of {'id','name','rank'} from the Node service."""
     if not ROBLOX_SERVICE_BASE or not ROBLOX_REMOVE_SECRET:
         return []
-    url = ROBLOX_SERVICE_BASE.rstrip('/') + '/ranks'
+    url = f"{ROBLOX_SERVICE_BASE}/ranks"
     try:
         async with aiohttp.ClientSession() as session:
             async with session.get(url, headers={"X-Secret-Key": ROBLOX_REMOVE_SECRET}, timeout=15) as resp:
@@ -305,13 +324,13 @@ async def fetch_group_ranks():
                     print(f"/ranks failed: {resp.status} {await resp.text()}")
                     return []
     except Exception as e:
-        print(f"fetch_group_ranks error: {e}")
+        print(f"fetch_group_ranks error: {type(e).__name__}: {e} (url={url})")
         return []
 
 async def set_group_rank(roblox_id: int, role_id: int = None, rank_number: int = None) -> bool:
     if not ROBLOX_SERVICE_BASE or not ROBLOX_REMOVE_SECRET:
         return False
-    url = ROBLOX_SERVICE_BASE.rstrip('/') + '/set-rank'
+    url = f"{ROBLOX_SERVICE_BASE}/set-rank"
     body = {"robloxId": int(roblox_id)}
     if role_id is not None:
         body["roleId"] = int(role_id)
@@ -326,8 +345,10 @@ async def set_group_rank(roblox_id: int, role_id: int = None, rank_number: int =
                     print(f"/set-rank failed: {resp.status} {await resp.text()}")
                     return False
     except Exception as e:
-        print(f"set_group_rank error: {e}")
+        print(f"set_group_rank error: {type(e).__name__}: {e} (url={url})")
         return False
+# === main.py (Part 2/3) ===
+
 # === Modals ===
 class AnnouncementForm(discord.ui.Modal, title='Send Announcement'):
     def __init__(self, color_obj: discord.Color):
@@ -694,6 +715,7 @@ async def removelastlog(interaction: discord.Interaction, member: discord.Member
         f"Removed last task for {member.mention}: '{last_log['task']}'. They now have {new_count} tasks.",
         ephemeral=True
     )
+
 @removelastlog.error
 async def removelastlog_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
     if isinstance(error, app_commands.MissingRole):
@@ -787,6 +809,7 @@ async def aa(interaction: discord.Interaction, note: str | None = None):
         allowed_mentions=discord.AllowedMentions(roles=True)
     )
     await interaction.response.send_message("Anomaly Actors have been pinged for a checkup.", ephemeral=True)
+# === main.py (Part 3/3) ===
 
 # Orientation commands
 @bot.tree.command(name="passedorientation", description="Mark a member as having passed orientation.")
@@ -890,7 +913,7 @@ async def extendorientation(
         ephemeral=True
     )
 
-# Weekly task summary (filtered to department role) + reset (but keep all-time logs)
+# Weekly task summary (filtered to department role) + reset
 @tasks.loop(time=datetime.time(hour=4, minute=0, tzinfo=datetime.timezone.utc))
 async def check_weekly_tasks():
     if utcnow().weekday() != 6:  # Sunday UTC
@@ -955,9 +978,8 @@ async def check_weekly_tasks():
         footer_text=None
     )
 
-    # IMPORTANT: keep all-time task history (do not truncate task_logs)
     async with bot.db_pool.acquire() as conn:
-        await conn.execute("TRUNCATE TABLE weekly_tasks, roblox_time, roblox_sessions")
+        await conn.execute("TRUNCATE TABLE weekly_tasks, task_logs, roblox_time, roblox_sessions")
     print("Weekly tasks and time checked and reset.")
 
 @check_weekly_tasks.before_loop
@@ -1064,7 +1086,7 @@ async def orientation_reminder_loop():
 async def before_orientation_loop():
     await bot.wait_until_ready()
 
-# === /rank with safe (async) autocomplete ===
+# --- /rank autocomplete helper ---
 async def group_role_autocomplete(interaction: discord.Interaction, current: str):
     current_lower = (current or "").lower()
     roles = await fetch_group_ranks()
@@ -1079,6 +1101,7 @@ async def group_role_autocomplete(interaction: discord.Interaction, current: str
             break
     return out
 
+# /rank with autocomplete (requires role id in RANK_MANAGER_ROLE_ID)
 @bot.tree.command(
     name="rank",
     description="(Rank Manager) Set a member's Roblox/Discord rank to a group role."
@@ -1144,6 +1167,7 @@ async def rank(
         msg += f" Also assigned Discord role **{assigned_role.name}**."
     await interaction.response.send_message(msg, ephemeral=True)
 
+# Attach autocomplete to the 'group_role' parameter
 @rank.autocomplete('group_role')
 async def group_role_autocomplete_cb(interaction: discord.Interaction, current: str):
     return await group_role_autocomplete(interaction, current)
