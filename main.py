@@ -33,11 +33,11 @@ API_SECRET_KEY = os.getenv("API_SECRET_KEY")  # for /roblox webhook auth
 
 # Command logging + Roblox service
 COMMAND_LOG_CHANNEL_ID = int(os.getenv("COMMAND_LOG_CHANNEL_ID", "1416965696230789150"))
-ROBLOX_REMOVE_URL = (os.getenv("ROBLOX_REMOVE_URL") or "").strip() or None
-ROBLOX_REMOVE_SECRET = (os.getenv("ROBLOX_REMOVE_SECRET") or "").strip() or None
-ROBLOX_SERVICE_BASE = (os.getenv("ROBLOX_SERVICE_BASE") or "").strip() or None
+ROBLOX_REMOVE_URL = os.getenv("ROBLOX_REMOVE_URL") or None
+ROBLOX_REMOVE_SECRET = os.getenv("ROBLOX_REMOVE_SECRET") or None
+ROBLOX_SERVICE_BASE = os.getenv("ROBLOX_SERVICE_BASE") or None
 
-# Rank manager role (can run /rank)
+# Rank manager role
 RANK_MANAGER_ROLE_ID = 1405979816120942702
 
 # Misc
@@ -81,16 +81,6 @@ def human_remaining(delta: datetime.timedelta) -> str:
     if hours: parts.append(f"{hours}h")
     if mins and not days: parts.append(f"{mins}m")
     return " ".join(parts) if parts else "under 1m"
-
-def _normalize_base(url: str | None) -> str | None:
-    if not url:
-        return None
-    url = url.strip()
-    if url and not (url.startswith("http://") or url.startswith("https://")):
-        # Assume https if scheme omitted
-        url = "https://" + url
-    return url.rstrip("/")
-
 class MD_BOT(commands.Bot):
     def __init__(self):
         super().__init__(command_prefix='!', intents=intents)
@@ -168,11 +158,6 @@ class MD_BOT(commands.Bot):
             await connection.execute("ALTER TABLE orientations ADD COLUMN IF NOT EXISTS expired_handled BOOLEAN DEFAULT FALSE;")
 
         print("Database tables are ready.")
-
-        # Normalize service URLs once
-        global ROBLOX_SERVICE_BASE, ROBLOX_REMOVE_URL
-        ROBLOX_SERVICE_BASE = _normalize_base(ROBLOX_SERVICE_BASE)
-        ROBLOX_REMOVE_URL = _normalize_base(ROBLOX_REMOVE_URL)
 
         # Sync slash commands
         try:
@@ -293,11 +278,11 @@ async def try_remove_from_roblox(discord_id: int) -> bool:
         async with aiohttp.ClientSession() as session:
             headers = {"X-Secret-Key": ROBLOX_REMOVE_SECRET, "Content-Type": "application/json"}
             payload = {"robloxId": int(roblox_id)}
-            async with session.post(ROBLOX_REMOVE_URL, headers=headers, json=payload, timeout=20) as resp:
+            async with session.post(ROBLOX_REMOVE_URL, headers=headers, json=payload, timeout=15) as resp:
                 ok = 200 <= resp.status < 300
                 if not ok:
                     text = await resp.text()
-                    print(f"Roblox removal failed ({resp.status}): {text}")
+                    print(f"Roblox removal failed: {resp.status} {text}")
                 return ok
     except Exception as e:
         print(f"Roblox removal call failed: {e}")
@@ -305,35 +290,26 @@ async def try_remove_from_roblox(discord_id: int) -> bool:
 
 async def fetch_group_ranks():
     """Return list of {'id','name','rank'} from the Node service."""
-    base = _normalize_base(ROBLOX_SERVICE_BASE)
-    if not base or not ROBLOX_REMOVE_SECRET:
-        print("fetch_group_ranks error: missing base or secret")
+    if not ROBLOX_SERVICE_BASE or not ROBLOX_REMOVE_SECRET:
         return []
-    url = f"{base}/ranks"
+    url = ROBLOX_SERVICE_BASE.rstrip('/') + '/ranks'
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.get(url, headers={"X-Secret-Key": ROBLOX_REMOVE_SECRET}, timeout=20) as resp:
+            async with session.get(url, headers={"X-Secret-Key": ROBLOX_REMOVE_SECRET}, timeout=15) as resp:
                 if 200 <= resp.status < 300:
-                    try:
-                        data = await resp.json()
-                    except Exception as je:
-                        txt = await resp.text()
-                        print(f"/ranks JSON parse error: {je}; body={txt[:200]}")
-                        return []
+                    data = await resp.json()
                     return data.get('roles', [])
                 else:
-                    txt = await resp.text()
-                    print(f"/ranks failed ({resp.status}) @ {url} :: {txt[:200]}")
+                    print(f"/ranks failed: {resp.status} {await resp.text()}")
                     return []
     except Exception as e:
-        print(f"fetch_group_ranks exception @ {url}: {e}")
+        print(f"fetch_group_ranks error: {e}")
         return []
 
 async def set_group_rank(roblox_id: int, role_id: int = None, rank_number: int = None) -> bool:
-    base = _normalize_base(ROBLOX_SERVICE_BASE)
-    if not base or not ROBLOX_REMOVE_SECRET:
+    if not ROBLOX_SERVICE_BASE or not ROBLOX_REMOVE_SECRET:
         return False
-    url = f"{base}/set-rank"
+    url = ROBLOX_SERVICE_BASE.rstrip('/') + '/set-rank'
     body = {"robloxId": int(roblox_id)}
     if role_id is not None:
         body["roleId"] = int(role_id)
@@ -341,21 +317,64 @@ async def set_group_rank(roblox_id: int, role_id: int = None, rank_number: int =
         body["rankNumber"] = int(rank_number)
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.post(
-                url, json=body,
-                headers={"X-Secret-Key": ROBLOX_REMOVE_SECRET, "Content-Type": "application/json"},
-                timeout=20
-            ) as resp:
+            async with session.post(url, json=body, headers={"X-Secret-Key": ROBLOX_REMOVE_SECRET, "Content-Type": "application/json"}, timeout=15) as resp:
                 if 200 <= resp.status < 300:
                     return True
                 else:
-                    txt = await resp.text()
-                    print(f"/set-rank failed ({resp.status}) @ {url} :: {txt[:200]}")
+                    print(f"/set-rank failed: {resp.status} {await resp.text()}")
                     return False
     except Exception as e:
-        print(f"set_group_rank exception @ {url}: {e}")
+        print(f"set_group_rank error: {e}")
         return False
 
+# === Clean command logging helpers ===
+def _fmt(val):
+    if val is None or val == "":
+        return "—"
+    return str(val)
+
+async def log_action(
+    *,
+    title: str,
+    actor: discord.abc.User | discord.Member,
+    fields: dict[str, str] | None = None,
+    color: discord.Color = discord.Color.dark_gray(),
+    guild: discord.Guild | None = None,
+    channel: discord.abc.GuildChannel | discord.DMChannel | None = None,
+    thumbnail_url: str | None = None,
+):
+    """Send a clean, readable log embed to COMMAND_LOG_CHANNEL_ID."""
+    if not COMMAND_LOG_CHANNEL_ID:
+        return
+    ch = bot.get_channel(COMMAND_LOG_CHANNEL_ID)
+    if not ch:
+        return
+
+    lines = []
+    if fields:
+        for k, v in fields.items():
+            lines.append(f"**{k}:** {_fmt(v)}")
+    desc = "\n".join(lines) if lines else "—"
+
+    embed = discord.Embed(title=title, description=desc, color=color, timestamp=utcnow())
+    author_name = f"{actor} ({actor.id})"
+    if getattr(actor, "avatar", None):
+        embed.set_author(name=author_name, icon_url=actor.avatar.url)
+    else:
+        embed.set_author(name=author_name)
+
+    footer_bits = []
+    if guild:
+        footer_bits.append(guild.name)
+    if channel and hasattr(channel, "name"):
+        footer_bits.append(f"#{channel.name}")
+    if footer_bits:
+        embed.set_footer(text=" • ".join(footer_bits))
+
+    if thumbnail_url:
+        embed.set_thumbnail(url=thumbnail_url)
+
+    await ch.send(embed=embed)
 # === Modals ===
 class AnnouncementForm(discord.ui.Modal, title='Send Announcement'):
     def __init__(self, color_obj: discord.Color):
@@ -384,6 +403,17 @@ class AnnouncementForm(discord.ui.Modal, title='Send Announcement'):
             footer_text=f"Announcement by {interaction.user.display_name}"
         )
         await interaction.response.send_message("Announcement sent successfully!", ephemeral=True)
+        await log_action(
+            title="Announcement Sent",
+            actor=interaction.user,
+            guild=interaction.guild,
+            channel=interaction.channel,
+            color=discord.Color.blurple(),
+            fields={
+                "Title": str(self.ann_title.value),
+                "Length": f"{len(self.ann_message.value)} chars"
+            }
+        )
 
 class LogTaskForm(discord.ui.Modal, title='Add Comments (optional)'):
     def __init__(self, proof: discord.Attachment, task_type: str):
@@ -435,6 +465,20 @@ class LogTaskForm(discord.ui.Modal, title='Add Comments (optional)'):
             f"Your task has been logged! You have completed {tasks_completed} task(s) this week.",
             ephemeral=True
         )
+        await log_action(
+            title="Task Logged",
+            actor=interaction.user,
+            guild=interaction.guild,
+            channel=interaction.channel,
+            color=discord.Color.green(),
+            fields={
+                "Member": interaction.user.mention,
+                "Task Type": self.task_type,
+                "Comments": comments_str,
+                "Proof": self.proof.url
+            },
+            thumbnail_url=self.proof.url if self.proof and self.proof.content_type and self.proof.content_type.startswith("image/") else None
+        )
 
 # === Events ===
 @bot.event
@@ -458,67 +502,28 @@ async def on_member_update(before: discord.Member, after: discord.Member):
                 after.id, assigned, deadline
             )
 
-# === Command usage logging (simplified) ===
-@bot.event
-async def on_interaction(interaction: discord.Interaction):
-    try:
-        if interaction.type == discord.InteractionType.application_command and COMMAND_LOG_CHANNEL_ID:
-            ch = bot.get_channel(COMMAND_LOG_CHANNEL_ID)
-            if ch:
-                user = interaction.user
-                data = interaction.data or {}
-                cmd = data.get("name", "unknown")
-                options = data.get("options", []) or []
-                # Pretty args like: user=@Rae, count=3, reason="..."
-                args = []
-                for opt in options:
-                    val = opt.get("value")
-                    if isinstance(val, str) and len(val) > 64:
-                        val = val[:61] + "…"
-                    args.append(f"{opt.get('name')}={val}")
-                args_str = ", ".join(args)
-
-                embed = discord.Embed(
-                    title="Command",
-                    description=f"/{cmd}" + (f" {args_str}" if args_str else ""),
-                    color=discord.Color.dark_gray(),
-                    timestamp=utcnow()
-                )
-                author_name = f"{user} ({user.id})"
-                if getattr(user, "avatar", None):
-                    embed.set_author(name=author_name, icon_url=user.avatar.url)
-                else:
-                    embed.set_author(name=author_name)
-                if interaction.guild and interaction.channel:
-                    embed.set_footer(text=f"{interaction.guild.name} • #{getattr(interaction.channel, 'name', 'dm')}")
-                await ch.send(embed=embed)
-    except Exception as e:
-        print(f"command log error: {e}")
-
+# Global error logger -> clean
 @bot.tree.error
 async def global_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
     try:
-        if COMMAND_LOG_CHANNEL_ID:
-            ch = bot.get_channel(COMMAND_LOG_CHANNEL_ID)
-            if ch:
-                embed = discord.Embed(
-                    title="Command Error",
-                    description=f"/{getattr(interaction.command, 'name', 'unknown')} → `{error}`",
-                    color=discord.Color.red(),
-                    timestamp=utcnow()
-                )
-                user = interaction.user
-                if getattr(user, "avatar", None):
-                    embed.set_author(name=f"{user} ({user.id})", icon_url=user.avatar.url)
-                else:
-                    embed.set_author(name=f"{user} ({user.id})")
-                await ch.send(embed=embed)
+        await log_action(
+            title="Command Error",
+            actor=interaction.user,
+            guild=interaction.guild,
+            channel=interaction.channel,
+            color=discord.Color.red(),
+            fields={
+                "Command": f"/{getattr(interaction.command, 'name', 'unknown')}",
+                "Error": f"{error}"
+            }
+        )
     finally:
         if not interaction.response.is_done():
             try:
                 await interaction.response.send_message("Sorry, something went wrong running that command.", ephemeral=True)
             except:
                 pass
+
 # === Slash Commands ===
 
 # VERIFY
@@ -540,6 +545,14 @@ async def verify(interaction: discord.Interaction, roblox_username: str):
                             interaction.user.id, roblox_id
                         )
                     await interaction.response.send_message(f"Successfully verified as {roblox_name}!", ephemeral=True)
+                    await log_action(
+                        title="Verification Linked",
+                        actor=interaction.user,
+                        guild=interaction.guild,
+                        channel=interaction.channel,
+                        color=discord.Color.green(),
+                        fields={"Roblox Name": roblox_name, "Roblox ID": roblox_id}
+                    )
                 else:
                     await interaction.response.send_message("Could not find that Roblox user.", ephemeral=True)
             else:
@@ -583,6 +596,13 @@ async def mytasks(interaction: discord.Interaction):
         f"You have **{tasks_completed}/{WEEKLY_REQUIREMENT}** tasks and **{time_spent_minutes}/{WEEKLY_TIME_REQUIREMENT}** mins.",
         ephemeral=True
     )
+    await log_action(
+        title="My Tasks Viewed",
+        actor=interaction.user,
+        guild=interaction.guild,
+        channel=interaction.channel,
+        fields={"Tasks": f"{tasks_completed}", "Minutes": f"{time_spent_minutes}"}
+    )
 
 # VIEWTASKS (totals by type, all-time)
 @bot.tree.command(name="viewtasks", description="Show a member's task totals by type (all-time).")
@@ -613,6 +633,13 @@ async def viewtasks(interaction: discord.Interaction, member: discord.Member | N
     )
     embed.set_footer(text=f"Total tasks: {total}")
     await interaction.response.send_message(embed=embed, ephemeral=True)
+    await log_action(
+        title="Tasks Viewed",
+        actor=interaction.user,
+        guild=interaction.guild,
+        channel=interaction.channel,
+        fields={"Member": target.display_name, "Total": str(total)}
+    )
 
 # ADDTASK (mgmt)
 @bot.tree.command(name="addtask", description="(Mgmt) Add tasks to a member's history and weekly totals.")
@@ -666,6 +693,21 @@ async def addtask(
         embed.set_image(url=proof_url)
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
+    await log_action(
+        title="(Mgmt) Tasks Added",
+        actor=interaction.user,
+        guild=interaction.guild,
+        channel=interaction.channel,
+        color=discord.Color.green(),
+        fields={
+            "Member": member.mention,
+            "Task Type": task_type,
+            "Count": str(count),
+            "Comments": comments_val,
+            "Proof": proof_url or "—"
+        },
+        thumbnail_url=proof_url if proof_url else None
+    )
 # LEADERBOARD (weekly)
 @bot.tree.command(name="leaderboard", description="Displays the weekly leaderboard (tasks + on-site minutes).")
 async def leaderboard(interaction: discord.Interaction):
@@ -704,6 +746,14 @@ async def leaderboard(interaction: discord.Interaction):
     embed.description = "\n".join(lines)
     await interaction.response.send_message(embed=embed)
 
+    await log_action(
+        title="Leaderboard Viewed",
+        actor=interaction.user,
+        guild=interaction.guild,
+        channel=interaction.channel,
+        fields={"Top Shown": str(min(10, len(records)))}
+    )
+
 # Remove last log (mgmt)
 @bot.tree.command(name="removelastlog", description="Removes the last logged task for a member.")
 @app_commands.checks.has_role(MANAGEMENT_ROLE_ID)
@@ -730,6 +780,25 @@ async def removelastlog(interaction: discord.Interaction, member: discord.Member
         f"Removed last task for {member.mention}: '{last_log['task']}'. They now have {new_count} tasks.",
         ephemeral=True
     )
+    await log_action(
+        title="(Mgmt) Removed Last Task",
+        actor=interaction.user,
+        guild=interaction.guild,
+        channel=interaction.channel,
+        color=discord.Color.orange(),
+        fields={
+            "Member": member.mention,
+            "Removed Task": last_log['task']
+        }
+    )
+
+@removelastlog.error
+async def removelastlog_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
+    if isinstance(error, app_commands.MissingRole):
+        await interaction.response.send_message("You do not have the required role.", ephemeral=True)
+    else:
+        await interaction.response.send_message("An error occurred.", ephemeral=True)
+        print(error)
 
 # Welcome
 @bot.tree.command(name="welcome", description="Sends the official welcome message.")
@@ -747,6 +816,15 @@ async def welcome(interaction: discord.Interaction):
     embed.set_footer(text="Best,\nThe Medical Department Management Team")
     await interaction.channel.send(embed=embed)
     await interaction.response.send_message("Welcome message sent!", ephemeral=True)
+    await log_action(
+        title="Welcome Sent",
+        actor=interaction.user,
+        guild=interaction.guild,
+        channel=interaction.channel,
+        color=discord.Color.blurple(),
+        fields={"Channel": f"#{interaction.channel.name}" if hasattr(interaction.channel, 'name') else 'DM/Unknown'}
+    )
+
 @welcome.error
 async def welcome_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
     if isinstance(error, app_commands.MissingRole):
@@ -772,6 +850,14 @@ async def dm(interaction: discord.Interaction, member: discord.Member, title: st
             footer_text=f"A special message from {interaction.guild.name}"
         )
         await interaction.response.send_message(f"Your message has been sent to {member.mention}!", ephemeral=True)
+        await log_action(
+            title="DM Sent",
+            actor=interaction.user,
+            guild=interaction.guild,
+            channel=interaction.channel,
+            color=discord.Color.magenta(),
+            fields={"To": member.mention, "Title": title}
+        )
     except discord.Forbidden:
         await interaction.response.send_message(f"I couldn't message {member.mention}. They might have DMs disabled.", ephemeral=True)
     except Exception as e:
@@ -815,6 +901,14 @@ async def aa(interaction: discord.Interaction, note: str | None = None):
         allowed_mentions=discord.AllowedMentions(roles=True)
     )
     await interaction.response.send_message("Anomaly Actors have been pinged for a checkup.", ephemeral=True)
+    await log_action(
+        title="AA Ping Sent",
+        actor=interaction.user,
+        guild=interaction.guild,
+        channel=interaction.channel,
+        color=discord.Color.purple(),
+        fields={"Note": note or "—"}
+    )
 
 # Orientation commands
 @bot.tree.command(name="passedorientation", description="Mark a member as having passed orientation.")
@@ -838,6 +932,14 @@ async def passedorientation(interaction: discord.Interaction, member: discord.Me
             member.id, assigned, deadline, passed_at
         )
     await interaction.response.send_message(f"Marked {member.mention} as **passed orientation**.", ephemeral=True)
+    await log_action(
+        title="Orientation Passed",
+        actor=interaction.user,
+        guild=interaction.guild,
+        channel=interaction.channel,
+        color=discord.Color.green(),
+        fields={"Member": member.mention}
+    )
 
 @bot.tree.command(name="orientationview", description="View a member's orientation status.")
 async def orientationview(interaction: discord.Interaction, member: discord.Member | None = None):
@@ -863,6 +965,13 @@ async def orientationview(interaction: discord.Interaction, member: discord.Memb
             f"(**{pretty}** remaining)"
         )
     await interaction.response.send_message(msg, ephemeral=True)
+    await log_action(
+        title="Orientation Viewed",
+        actor=interaction.user,
+        guild=interaction.guild,
+        channel=interaction.channel,
+        fields={"Member": target.display_name}
+    )
 
 @bot.tree.command(name="extendorientation", description="(Mgmt) Extend a member's orientation deadline by N days.")
 @app_commands.checks.has_role(MANAGEMENT_ROLE_ID)
@@ -896,22 +1005,19 @@ async def extendorientation(
             new_deadline, member.id
         )
 
-    # Log extension
-    if COMMAND_LOG_CHANNEL_ID:
-        ch = bot.get_channel(COMMAND_LOG_CHANNEL_ID)
-        if ch:
-            embed = discord.Embed(
-                title="Orientation Deadline Extended",
-                description=(
-                    f"Member: {member.mention}\n"
-                    f"Added: **{days}** day(s)\n"
-                    f"New deadline: **{new_deadline.strftime('%Y-%m-%d %H:%M UTC')}**\n"
-                    f"Reason: {reason or '—'}"
-                ),
-                color=discord.Color.blurple(),
-                timestamp=utcnow()
-            )
-            await ch.send(embed=embed)
+    await log_action(
+        title="Orientation Deadline Extended",
+        actor=interaction.user,
+        guild=interaction.guild,
+        channel=interaction.channel,
+        color=discord.Color.blurple(),
+        fields={
+            "Member": member.mention,
+            "Days Added": str(days),
+            "New Deadline": new_deadline.strftime('%Y-%m-%d %H:%M UTC'),
+            "Reason": reason or "—"
+        }
+    )
 
     await interaction.response.send_message(
         f"Extended {member.mention}'s orientation by **{days}** day(s). New deadline: **{new_deadline.strftime('%Y-%m-%d %H:%M UTC')}**.",
@@ -991,7 +1097,7 @@ async def check_weekly_tasks():
 async def before_check():
     await bot.wait_until_ready()
 
-# Orientation 5-day warning + overdue enforcement (kicks if overdue)
+# Orientation 5-day warning + overdue enforcement
 @tasks.loop(minutes=30)
 async def orientation_reminder_loop():
     try:
@@ -1062,20 +1168,19 @@ async def orientation_reminder_loop():
                         print(f"Kick failed for {member.id}: {e}")
                         kicked = False
 
-                    # Log enforcement
-                    if COMMAND_LOG_CHANNEL_ID:
-                        ch = bot.get_channel(COMMAND_LOG_CHANNEL_ID)
-                        if ch:
-                            desc = f"Expired orientation for <@{discord_id}>.\n"
-                            desc += f"• Roblox removal: {'✅' if roblox_removed else 'Skipped/Failed ❌'}\n"
-                            desc += f"• Discord kick: {'✅' if kicked else '❌'}"
-                            embed = discord.Embed(
-                                title="Orientation Expiry Enforced",
-                                description=desc,
-                                color=discord.Color.orange(),
-                                timestamp=utcnow()
-                            )
-                            await ch.send(embed=embed)
+                    # Log enforcement (clean)
+                    await log_action(
+                        title="Orientation Expired (Enforced)",
+                        actor=bot.user,
+                        guild=g,
+                        channel=alert_channel,
+                        color=discord.Color.orange(),
+                        fields={
+                            "Member": f"<@{discord_id}>",
+                            "Roblox removal": "Yes" if roblox_removed else "No / Failed",
+                            "Discord kick": "Yes" if kicked else "No"
+                        }
+                    )
 
                     # Mark handled
                     async with bot.db_pool.acquire() as conn3:
@@ -1091,34 +1196,7 @@ async def orientation_reminder_loop():
 async def before_orientation_loop():
     await bot.wait_until_ready()
 
-# --- RANK utilities ---
-async def _remove_old_rank_roles(member: discord.Member, rank_names: list[str]):
-    """Remove any Discord roles whose name matches a Roblox group role name (case-insensitive)."""
-    to_remove = []
-    rnames = {n.lower() for n in rank_names}
-    for role in member.roles:
-        if role.is_default():
-            continue
-        if role.name.lower() in rnames:
-            to_remove.append(role)
-    if to_remove:
-        try:
-            await member.remove_roles(*to_remove, reason="Replacing with new rank via /rank")
-        except Exception as e:
-            print(f"remove old rank roles error: {e}")
-
-# Quick test command to verify ranks endpoint
-@bot.tree.command(name="ranks", description="(Rank Manager) Test: list first 20 Roblox group ranks from the service.")
-@app_commands.checks.has_role(RANK_MANAGER_ROLE_ID)
-async def ranks(interaction: discord.Interaction):
-    roles = await fetch_group_ranks()
-    if not roles:
-        await interaction.response.send_message("No roles returned. Check service URL/secret.", ephemeral=True)
-        return
-    lines = [f"{r.get('rank', '?'):>3} • {r.get('name', 'Unknown')} (id={r.get('id', '?')})" for r in roles[:20]]
-    await interaction.response.send_message("Top roles:\n" + "\n".join(lines), ephemeral=True)
-
-# /rank with autocomplete by name; also removes old rank roles before adding the new one
+# === Rank autocomplete & command ===
 async def group_role_autocomplete(interaction: discord.Interaction, current: str):
     current_lower = (current or "").lower()
     roles = await fetch_group_ranks()
@@ -1168,10 +1246,6 @@ async def rank(
         await interaction.response.send_message("That rank wasn’t found. Try typing to see suggestions.", ephemeral=True)
         return
 
-    # Remove any old mapped discord rank roles first
-    rank_names = [r.get('name','') for r in ranks if r.get('name')]
-    await _remove_old_rank_roles(member, rank_names)
-
     # Set Roblox rank via service
     ok = await set_group_rank(int(roblox_id), role_id=int(target['id']))
     if not ok:
@@ -1191,6 +1265,7 @@ async def rank(
     try:
         for role in interaction.guild.roles:
             if role.name.lower() == target['name'].lower():
+                await member.remove_roles(*[r for r in member.roles if r.name.lower() == target['name'].lower() and r != role], reason="Cleanup old matching roles")
                 await member.add_roles(role, reason=f"Rank set via /rank by {interaction.user}")
                 assigned_role = role
                 break
@@ -1201,6 +1276,19 @@ async def rank(
     if assigned_role:
         msg += f" Also assigned Discord role **{assigned_role.name}**."
     await interaction.response.send_message(msg, ephemeral=True)
+
+    await log_action(
+        title="User Ranked",
+        actor=interaction.user,
+        guild=interaction.guild,
+        channel=interaction.channel,
+        color=discord.Color.gold(),
+        fields={
+            "Member": member.mention,
+            "Rank": target['name'],
+            "Discord Role Assigned": assigned_role.name if assigned_role else "No matching role"
+        }
+    )
 
 @rank.autocomplete('group_role')
 async def group_role_autocomplete_cb(interaction: discord.Interaction, current: str):
