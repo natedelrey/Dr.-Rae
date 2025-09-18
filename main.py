@@ -191,7 +191,8 @@ class MD_BOT(commands.Bot):
         await site.start()
         print("Web server for Roblox integration is running.")
 
-    async def roblox_handler(self, request):
+       async def roblox_handler(self, request):
+        # Simple secret check
         if request.headers.get("X-Secret-Key") != API_SECRET_KEY:
             return web.Response(status=401)
 
@@ -199,34 +200,79 @@ class MD_BOT(commands.Bot):
         roblox_id = data.get("robloxId")
         status = data.get("status")
 
+        # Map roblox_id -> discord_id
         async with self.db_pool.acquire() as connection:
             discord_id = await connection.fetchval(
-                "SELECT discord_id FROM roblox_verification WHERE roblox_id = $1", roblox_id
+                "SELECT discord_id FROM roblox_verification WHERE roblox_id = $1",
+                roblox_id
             )
 
         if discord_id:
             if status == "joined":
+                # Start (or overwrite) a session
                 async with self.db_pool.acquire() as connection:
                     await connection.execute(
                         "INSERT INTO roblox_sessions (roblox_id, start_time) VALUES ($1, $2) "
                         "ON CONFLICT (roblox_id) DO UPDATE SET start_time = $2",
                         roblox_id, utcnow()
                     )
+
             elif status == "left":
                 async with self.db_pool.acquire() as connection:
                     session_start = await connection.fetchval(
-                        "SELECT start_time FROM roblox_sessions WHERE roblox_id = $1", roblox_id
+                        "SELECT start_time FROM roblox_sessions WHERE roblox_id = $1",
+                        roblox_id
                     )
+
                     if session_start:
+                        # End session first
                         await connection.execute(
-                            "DELETE FROM roblox_sessions WHERE roblox_id = $1", roblox_id
+                            "DELETE FROM roblox_sessions WHERE roblox_id = $1",
+                            roblox_id
                         )
-                        duration = (utcnow() - session_start).total_seconds()
+
+                        # Add elapsed time to weekly bucket
+                        duration_seconds = int((utcnow() - session_start).total_seconds())
                         await connection.execute(
                             "INSERT INTO roblox_time (member_id, time_spent) VALUES ($1, $2) "
                             "ON CONFLICT (member_id) DO UPDATE SET time_spent = roblox_time.time_spent + $2",
-                            discord_id, int(duration)
+                            discord_id, duration_seconds
                         )
+
+                        # Fetch new weekly total for the footer
+                        new_total_seconds = await connection.fetchval(
+                            "SELECT time_spent FROM roblox_time WHERE member_id = $1",
+                            discord_id
+                        )
+
+                        # Try to log a nice activity embed
+                        try:
+                            # Get the channel (this also gives us the guild to resolve the member nicely)
+                            activity_ch = await self.fetch_channel(ACTIVITY_LOG_CHANNEL_ID)
+                            if activity_ch:
+                                # Safely resolve the member (may raise if they aren't in this guild)
+                                member = None
+                                try:
+                                    member = await activity_ch.guild.fetch_member(discord_id)
+                                except Exception:
+                                    # Member might not be in that guild; fall back to a plain mention
+                                    pass
+
+                                minutes = duration_seconds // 60
+                                total_minutes = (new_total_seconds or 0) // 60
+
+                                display_name = member.display_name if member else f"<@{discord_id}>"
+                                embed = discord.Embed(
+                                    title="Roblox Activity Logged",
+                                    description=f"**{display_name}** was on-site for **{minutes} minutes**.",
+                                    color=discord.Color.blue(),
+                                    timestamp=utcnow()
+                                )
+                                embed.set_footer(text=f"Total on-site time this week: {total_minutes} minutes")
+                                await activity_ch.send(embed=embed)
+                        except Exception as e:
+                            print(f"Error sending activity log: {e}")
+
         return web.Response(status=200)
 
 bot = MD_BOT()
