@@ -1,3 +1,5 @@
+# main.py  (Medical Department bot)
+
 import discord
 from discord.ext import commands, tasks
 import os
@@ -22,26 +24,22 @@ def getenv_int(name: str, default: int | None = None) -> int | None:
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
-ANNOUNCEMENT_CHANNEL_ID = getenv_int("ANNOUNCEMENT_CHANNEL_ID")
-LOG_CHANNEL_ID          = getenv_int("LOG_CHANNEL_ID")
-ANNOUNCEMENT_ROLE_ID    = getenv_int("ANNOUNCEMENT_ROLE_ID")
-MANAGEMENT_ROLE_ID      = getenv_int("MANAGEMENT_ROLE_ID")
-
-# AA ping
-AA_CHANNEL_ID            = getenv_int("AA_CHANNEL_ID")
-ANOMALY_ACTORS_ROLE_ID   = getenv_int("ANOMALY_ACTORS_ROLE_ID")
-
-# Department & Orientation
+# Channels / roles
+ANNOUNCEMENT_CHANNEL_ID      = getenv_int("ANNOUNCEMENT_CHANNEL_ID")
+LOG_CHANNEL_ID               = getenv_int("LOG_CHANNEL_ID")
+ANNOUNCEMENT_ROLE_ID         = getenv_int("ANNOUNCEMENT_ROLE_ID")
+MANAGEMENT_ROLE_ID           = getenv_int("MANAGEMENT_ROLE_ID")
+AA_CHANNEL_ID                = getenv_int("AA_CHANNEL_ID")
+ANOMALY_ACTORS_ROLE_ID       = getenv_int("ANOMALY_ACTORS_ROLE_ID")
 DEPARTMENT_ROLE_ID           = getenv_int("DEPARTMENT_ROLE_ID")
 MEDICAL_STUDENT_ROLE_ID      = getenv_int("MEDICAL_STUDENT_ROLE_ID")
 ORIENTATION_ALERT_CHANNEL_ID = getenv_int("ORIENTATION_ALERT_CHANNEL_ID")
+COMMAND_LOG_CHANNEL_ID       = getenv_int("COMMAND_LOG_CHANNEL_ID", 1416965696230789150)
+ACTIVITY_LOG_CHANNEL_ID      = getenv_int("ACTIVITY_LOG_CHANNEL_ID", 1409646416829354095)
 
 # DB / API
 DATABASE_URL   = os.getenv("DATABASE_URL")
 API_SECRET_KEY = os.getenv("API_SECRET_KEY")  # for /roblox webhook auth
-
-# Command logging + Roblox service
-COMMAND_LOG_CHANNEL_ID = getenv_int("COMMAND_LOG_CHANNEL_ID", 1416965696230789150)
 
 def _normalize_base(url: str | None) -> str | None:
     if not url:
@@ -56,14 +54,14 @@ ROBLOX_REMOVE_URL   = os.getenv("ROBLOX_REMOVE_URL") or None
 if ROBLOX_REMOVE_URL and not ROBLOX_REMOVE_URL.startswith("http"):
     ROBLOX_REMOVE_URL = "https://" + ROBLOX_REMOVE_URL
 ROBLOX_REMOVE_SECRET = os.getenv("ROBLOX_REMOVE_SECRET") or None
+ROBLOX_GROUP_ID      = os.getenv("ROBLOX_GROUP_ID") or None  # optional, forwarded if present
 
 # Rank manager role (can run /rank)
 RANK_MANAGER_ROLE_ID = getenv_int("RANK_MANAGER_ROLE_ID", 1405979816120942702)
 
-# Misc
-ACTIVITY_LOG_CHANNEL_ID   = getenv_int("ACTIVITY_LOG_CHANNEL_ID", 1409646416829354095)
-WEEKLY_REQUIREMENT        = int(os.getenv("WEEKLY_REQUIREMENT", "3"))
-WEEKLY_TIME_REQUIREMENT   = int(os.getenv("WEEKLY_TIME_REQUIREMENT", "45"))  # minutes
+# Weekly configs
+WEEKLY_REQUIREMENT      = int(os.getenv("WEEKLY_REQUIREMENT", "3"))
+WEEKLY_TIME_REQUIREMENT = int(os.getenv("WEEKLY_TIME_REQUIREMENT", "45"))  # minutes
 
 # === Bot Setup ===
 intents = discord.Intents.default()
@@ -104,214 +102,8 @@ def human_remaining(delta: datetime.timedelta) -> str:
 
 def week_key(dt: datetime.datetime | None = None) -> str:
     d = dt or utcnow()
-    iso = d.isocalendar()
+    iso = d.isocalendar()  # (year, week, weekday)
     return f"{iso.year}-W{iso.week:02d}"
-
-class MD_BOT(commands.Bot):
-    def __init__(self):
-        super().__init__(command_prefix='!', intents=intents)
-        self.db_pool = None
-
-    async def setup_hook(self):
-        # DB pool
-        try:
-            self.db_pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=10)
-            async with self.db_pool.acquire() as c:
-                await c.execute('SELECT 1')
-            print("[DB] Connected.")
-        except Exception as e:
-            print(f"[DB] FAILED: {e}")
-            return
-
-        # Schema (create if missing) — make sure STRIKES exists before any ALTER on it
-        async with self.db_pool.acquire() as connection:
-            await connection.execute('''
-                CREATE TABLE IF NOT EXISTS weekly_tasks (
-                    member_id BIGINT PRIMARY KEY,
-                    tasks_completed INT DEFAULT 0
-                );
-            ''')
-
-            await connection.execute('''
-                CREATE TABLE IF NOT EXISTS task_logs (
-                    log_id SERIAL PRIMARY KEY,
-                    member_id BIGINT,
-                    task TEXT,
-                    task_type TEXT,
-                    proof_url TEXT,
-                    comments TEXT,
-                    timestamp TIMESTAMPTZ
-                );
-            ''')
-
-            await connection.execute('''
-                CREATE TABLE IF NOT EXISTS weekly_task_logs (
-                    log_id SERIAL PRIMARY KEY,
-                    member_id BIGINT,
-                    task TEXT,
-                    task_type TEXT,
-                    proof_url TEXT,
-                    comments TEXT,
-                    timestamp TIMESTAMPTZ
-                );
-            ''')
-
-            await connection.execute('''
-                CREATE TABLE IF NOT EXISTS roblox_verification (
-                    discord_id BIGINT PRIMARY KEY,
-                    roblox_id BIGINT UNIQUE
-                );
-            ''')
-
-            await connection.execute('''
-                CREATE TABLE IF NOT EXISTS roblox_time (
-                    member_id BIGINT PRIMARY KEY,
-                    time_spent INT DEFAULT 0
-                );
-            ''')
-
-            await connection.execute('''
-                CREATE TABLE IF NOT EXISTS roblox_sessions (
-                    roblox_id BIGINT PRIMARY KEY,
-                    start_time TIMESTAMPTZ
-                );
-            ''')
-
-            await connection.execute('''
-                CREATE TABLE IF NOT EXISTS orientations (
-                    discord_id BIGINT PRIMARY KEY,
-                    assigned_at TIMESTAMPTZ,
-                    deadline TIMESTAMPTZ,
-                    passed BOOLEAN DEFAULT FALSE,
-                    passed_at TIMESTAMPTZ,
-                    warned_5d BOOLEAN DEFAULT FALSE,
-                    expired_handled BOOLEAN DEFAULT FALSE
-                );
-            ''')
-
-            # Strike system (CREATE before ALTER!)
-            await connection.execute('''
-                CREATE TABLE IF NOT EXISTS strikes (
-                    strike_id SERIAL PRIMARY KEY,
-                    member_id BIGINT NOT NULL,
-                    reason TEXT,
-                    issued_at TIMESTAMPTZ NOT NULL,
-                    expires_at TIMESTAMPTZ NOT NULL,
-                    set_by BIGINT,
-                    auto BOOLEAN DEFAULT FALSE
-                );
-            ''')
-
-            # Ensure new columns exist (safe even if present)
-            await connection.execute("ALTER TABLE orientations ADD COLUMN IF NOT EXISTS passed_at TIMESTAMPTZ;")
-            await connection.execute("ALTER TABLE orientations ADD COLUMN IF NOT EXISTS warned_5d BOOLEAN DEFAULT FALSE;")
-            await connection.execute("ALTER TABLE orientations ADD COLUMN IF NOT EXISTS expired_handled BOOLEAN DEFAULT FALSE;")
-            await connection.execute("ALTER TABLE strikes ADD COLUMN IF NOT EXISTS set_by BIGINT;")
-            await connection.execute("ALTER TABLE strikes ADD COLUMN IF NOT EXISTS auto BOOLEAN DEFAULT FALSE;")
-
-            await connection.execute('''
-                CREATE TABLE IF NOT EXISTS member_ranks (
-                    discord_id BIGINT PRIMARY KEY,
-                    rank TEXT,
-                    set_by BIGINT,
-                    set_at TIMESTAMPTZ
-                );
-            ''')
-
-            await connection.execute('''
-                CREATE TABLE IF NOT EXISTS activity_excuses (
-                    week_key TEXT PRIMARY KEY,
-                    reason TEXT,
-                    set_by BIGINT,
-                    set_at TIMESTAMPTZ
-                );
-            ''')
-
-        print("[DB] Tables ready.")
-
-        # Sync slash commands
-        try:
-            synced = await self.tree.sync()
-            print(f"[Slash] Synced {len(synced)} command(s)")
-        except Exception as e:
-            print(f"[Slash] Sync failed: {e}")
-
-        # Web server for Roblox integration (time tracking)
-        app = web.Application()
-        app.router.add_get('/health', lambda _: web.Response(text='ok', status=200))
-        app.router.add_post('/roblox', self.roblox_handler)
-        runner = web.AppRunner(app)
-        await runner.setup()
-        site = web.TCPSite(runner, '0.0.0.0', 8080)
-        await site.start()
-        print("[Web] Server up on :8080 (GET /health, POST /roblox).")
-
-    # --- Roblox webhook: now with activity embeds like your E&L bot ---
-    async def roblox_handler(self, request):
-        print("[/roblox] hit")
-        if request.headers.get("X-Secret-Key") != API_SECRET_KEY:
-            print("[/roblox] 401 bad secret")
-            return web.Response(status=401)
-        data = await request.json()
-        roblox_id = data.get("robloxId")
-        status = data.get("status")
-        print(f"[/roblox] body: {data}")
-
-        async with self.db_pool.acquire() as connection:
-            discord_id = await connection.fetchval(
-                "SELECT discord_id FROM roblox_verification WHERE roblox_id = $1", roblox_id
-            )
-
-        if discord_id:
-            if status == "joined":
-                async with self.db_pool.acquire() as connection:
-                    await connection.execute(
-                        "INSERT INTO roblox_sessions (roblox_id, start_time) VALUES ($1, $2) "
-                        "ON CONFLICT (roblox_id) DO UPDATE SET start_time = $2",
-                        roblox_id, utcnow()
-                    )
-                member = find_member(int(discord_id))
-                name = member.display_name if member else f"User {discord_id}"
-                await send_activity_embed(
-                    "🟢 Joined Site",
-                    f"**{name}** started a session.",
-                    discord.Color.green()
-                )
-
-            elif status == "left":
-                session_start = None
-                async with self.db_pool.acquire() as connection:
-                    session_start = await connection.fetchval(
-                        "SELECT start_time FROM roblox_sessions WHERE roblox_id = $1", roblox_id
-                    )
-                    if session_start:
-                        await connection.execute("DELETE FROM roblox_sessions WHERE roblox_id = $1", roblox_id)
-                        duration = (utcnow() - session_start).total_seconds()
-                        await connection.execute(
-                            "INSERT INTO roblox_time (member_id, time_spent) VALUES ($1, $2) "
-                            "ON CONFLICT (member_id) DO UPDATE SET time_spent = roblox_time.time_spent + $2",
-                            discord_id, int(duration)
-                        )
-
-                mins = int((utcnow() - session_start).total_seconds() // 60) if session_start else 0
-                # weekly total (seconds -> minutes)
-                weekly_minutes = 0
-                async with self.db_pool.acquire() as connection:
-                    total_seconds = await connection.fetchval(
-                        "SELECT time_spent FROM roblox_time WHERE member_id=$1", discord_id
-                    ) or 0
-                weekly_minutes = total_seconds // 60
-                member = find_member(int(discord_id))
-                name = member.display_name if member else f"User {discord_id}"
-                await send_activity_embed(
-                    "🔴 Left Site",
-                    f"**{name}** ended their session. Time this session: **{mins} min**.\nThis week: **{weekly_minutes}/{WEEKLY_TIME_REQUIREMENT} min**",
-                    discord.Color.red()
-                )
-
-        return web.Response(status=200)
-
-bot = MD_BOT()
 
 # === Helpers ===
 def smart_chunk(text, size=4000):
@@ -368,22 +160,7 @@ def find_member(discord_id: int) -> discord.Member | None:
             return m
     return None
 
-# Orientation helpers
-async def ensure_orientation_record(member: discord.Member):
-    async with bot.db_pool.acquire() as conn:
-        row = await conn.fetchrow("SELECT discord_id FROM orientations WHERE discord_id = $1", member.id)
-        if row:
-            return
-        if MEDICAL_STUDENT_ROLE_ID and any(r.id == MEDICAL_STUDENT_ROLE_ID for r in member.roles):
-            assigned = utcnow()
-            deadline = assigned + datetime.timedelta(days=14)
-            await conn.execute(
-                "INSERT INTO orientations (discord_id, assigned_at, deadline, passed, warned_5d, expired_handled) "
-                "VALUES ($1, $2, $3, FALSE, FALSE, FALSE)",
-                member.id, assigned, deadline
-            )
-
-# Retry helper for HTTP
+# === Roblox service helpers ===
 async def _retry(coro_factory, attempts=3, delay=0.8):
     last_exc = None
     for i in range(attempts):
@@ -395,7 +172,6 @@ async def _retry(coro_factory, attempts=3, delay=0.8):
                 await asyncio.sleep(delay)
     raise last_exc
 
-# Roblox svc helpers
 async def try_remove_from_roblox(discord_id: int) -> bool:
     if not ROBLOX_REMOVE_URL or not ROBLOX_REMOVE_SECRET:
         return False
@@ -410,6 +186,11 @@ async def try_remove_from_roblox(discord_id: int) -> bool:
             async with aiohttp.ClientSession() as session:
                 headers = {"X-Secret-Key": ROBLOX_REMOVE_SECRET, "Content-Type": "application/json"}
                 payload = {"robloxId": int(roblox_id)}
+                if ROBLOX_GROUP_ID:
+                    try:
+                        payload["groupId"] = int(ROBLOX_GROUP_ID)
+                    except:
+                        pass
                 async with session.post(ROBLOX_REMOVE_URL, headers=headers, json=payload, timeout=20) as resp:
                     if not (200 <= resp.status < 300):
                         text = await resp.text()
@@ -427,7 +208,8 @@ async def fetch_group_ranks():
     try:
         async def do_get():
             async with aiohttp.ClientSession() as session:
-                async with session.get(url, headers={"X-Secret-Key": ROBLOX_REMOVE_SECRET}, timeout=20) as resp:
+                headers = {"X-Secret-Key": ROBLOX_REMOVE_SECRET}
+                async with session.get(url, headers=headers, timeout=20) as resp:
                     if not (200 <= resp.status < 300):
                         text = await resp.text()
                         raise RuntimeError(f"/ranks HTTP {resp.status}: {text}")
@@ -447,6 +229,11 @@ async def set_group_rank(roblox_id: int, role_id: int = None, rank_number: int =
         body["roleId"] = int(role_id)
     if rank_number is not None:
         body["rankNumber"] = int(rank_number)
+    if ROBLOX_GROUP_ID:
+        try:
+            body["groupId"] = int(ROBLOX_GROUP_ID)
+        except:
+            pass
     try:
         async def do_post():
             async with aiohttp.ClientSession() as session:
@@ -459,6 +246,209 @@ async def set_group_rank(roblox_id: int, role_id: int = None, rank_number: int =
     except Exception as e:
         print(f"set_group_rank error: {e}")
         return False
+
+# === Bot class ===
+class MD_BOT(commands.Bot):
+    def __init__(self):
+        super().__init__(command_prefix='!', intents=intents)
+        self.db_pool = None
+
+    async def setup_hook(self):
+        # DB pool
+        try:
+            self.db_pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=10)
+            async with self.db_pool.acquire() as c:
+                await c.execute('SELECT 1')
+            print("[DB] Connected.")
+        except Exception as e:
+            print(f"[DB] FAILED: {e}")
+            return
+
+        # Schema (create/ensure)
+        async with self.db_pool.acquire() as connection:
+            await connection.execute('''
+                CREATE TABLE IF NOT EXISTS weekly_tasks (
+                    member_id BIGINT PRIMARY KEY,
+                    tasks_completed INT DEFAULT 0
+                );
+            ''')
+            await connection.execute('''
+                CREATE TABLE IF NOT EXISTS task_logs (
+                    log_id SERIAL PRIMARY KEY,
+                    member_id BIGINT,
+                    task TEXT,
+                    task_type TEXT,
+                    proof_url TEXT,
+                    comments TEXT,
+                    timestamp TIMESTAMPTZ
+                );
+            ''')
+            await connection.execute('''
+                CREATE TABLE IF NOT EXISTS weekly_task_logs (
+                    log_id SERIAL PRIMARY KEY,
+                    member_id BIGINT,
+                    task TEXT,
+                    task_type TEXT,
+                    proof_url TEXT,
+                    comments TEXT,
+                    timestamp TIMESTAMPTZ
+                );
+            ''')
+            await connection.execute('''
+                CREATE TABLE IF NOT EXISTS roblox_verification (
+                    discord_id BIGINT PRIMARY KEY,
+                    roblox_id BIGINT UNIQUE
+                );
+            ''')
+            await connection.execute('''
+                CREATE TABLE IF NOT EXISTS roblox_time (
+                    member_id BIGINT PRIMARY KEY,
+                    time_spent INT DEFAULT 0
+                );
+            ''')
+            await connection.execute('''
+                CREATE TABLE IF NOT EXISTS roblox_sessions (
+                    roblox_id BIGINT PRIMARY KEY,
+                    start_time TIMESTAMPTZ
+                );
+            ''')
+            await connection.execute('''
+                CREATE TABLE IF NOT EXISTS orientations (
+                    discord_id BIGINT PRIMARY KEY,
+                    assigned_at TIMESTAMPTZ,
+                    deadline TIMESTAMPTZ,
+                    passed BOOLEAN DEFAULT FALSE,
+                    passed_at TIMESTAMPTZ,
+                    warned_5d BOOLEAN DEFAULT FALSE,
+                    expired_handled BOOLEAN DEFAULT FALSE
+                );
+            ''')
+            # Strike system (create BEFORE altering)
+            await connection.execute('''
+                CREATE TABLE IF NOT EXISTS strikes (
+                    strike_id SERIAL PRIMARY KEY,
+                    member_id BIGINT NOT NULL,
+                    reason TEXT,
+                    issued_at TIMESTAMPTZ NOT NULL,
+                    expires_at TIMESTAMPTZ NOT NULL,
+                    set_by BIGINT,
+                    auto BOOLEAN DEFAULT FALSE
+                );
+            ''')
+
+            # --- Safe ALTERs for older DBs (fixes UndefinedColumnError) ---
+            await connection.execute("ALTER TABLE weekly_task_logs ADD COLUMN IF NOT EXISTS task TEXT;")
+            await connection.execute("ALTER TABLE task_logs ADD COLUMN IF NOT EXISTS task TEXT;")
+            await connection.execute("UPDATE weekly_task_logs SET task = COALESCE(task, task_type) WHERE task IS NULL;")
+            await connection.execute("UPDATE task_logs SET task = COALESCE(task, task_type) WHERE task IS NULL;")
+
+            # Ensure safety columns exist
+            await connection.execute("ALTER TABLE orientations ADD COLUMN IF NOT EXISTS passed_at TIMESTAMPTZ;")
+            await connection.execute("ALTER TABLE orientations ADD COLUMN IF NOT EXISTS warned_5d BOOLEAN DEFAULT FALSE;")
+            await connection.execute("ALTER TABLE orientations ADD COLUMN IF NOT EXISTS expired_handled BOOLEAN DEFAULT FALSE;")
+            await connection.execute("ALTER TABLE strikes ADD COLUMN IF NOT EXISTS set_by BIGINT;")
+            await connection.execute("ALTER TABLE strikes ADD COLUMN IF NOT EXISTS auto BOOLEAN DEFAULT FALSE;")
+
+            await connection.execute('''
+                CREATE TABLE IF NOT EXISTS member_ranks (
+                    discord_id BIGINT PRIMARY KEY,
+                    rank TEXT,
+                    set_by BIGINT,
+                    set_at TIMESTAMPTZ
+                );
+            ''')
+            await connection.execute('''
+                CREATE TABLE IF NOT EXISTS activity_excuses (
+                    week_key TEXT PRIMARY KEY,
+                    reason TEXT,
+                    set_by BIGINT,
+                    set_at TIMESTAMPTZ
+                );
+            ''')
+
+        print("[DB] Tables ready.")
+
+        # Sync slash commands
+        try:
+            synced = await self.tree.sync()
+            print(f"[Slash] Synced {len(synced)} command(s)")
+        except Exception as e:
+            print(f"[Slash] Sync failed: {e}")
+
+        # Web server for Roblox integration
+        app = web.Application()
+        app.router.add_get('/health', lambda _: web.Response(text='ok', status=200))
+        app.router.add_post('/roblox', self.roblox_handler)
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, '0.0.0.0', 8080)
+        await site.start()
+        print("[Web] Server up on :8080 (GET /health, POST /roblox).")
+
+    # --- Roblox webhook with activity embeds ---
+    async def roblox_handler(self, request):
+        print("[/roblox] hit")
+        if request.headers.get("X-Secret-Key") != API_SECRET_KEY:
+            print("[/roblox] 401 bad secret")
+            return web.Response(status=401)
+        data = await request.json()
+        roblox_id = data.get("robloxId")
+        status = data.get("status")
+        print(f"[/roblox] body: {data}")
+
+        async with self.db_pool.acquire() as connection:
+            discord_id = await connection.fetchval(
+                "SELECT discord_id FROM roblox_verification WHERE roblox_id = $1", roblox_id
+            )
+
+        if discord_id:
+            if status == "joined":
+                async with self.db_pool.acquire() as connection:
+                    await connection.execute(
+                        "INSERT INTO roblox_sessions (roblox_id, start_time) VALUES ($1, $2) "
+                        "ON CONFLICT (roblox_id) DO UPDATE SET start_time = $2",
+                        roblox_id, utcnow()
+                    )
+                member = find_member(int(discord_id))
+                name = member.display_name if member else f"User {discord_id}"
+                await send_activity_embed(
+                    "🟢 Joined Site",
+                    f"**{name}** started a session.",
+                    discord.Color.green()
+                )
+
+            elif status == "left":
+                session_start = None
+                async with self.db_pool.acquire() as connection:
+                    session_start = await connection.fetchval(
+                        "SELECT start_time FROM roblox_sessions WHERE roblox_id = $1", roblox_id
+                    )
+                    if session_start:
+                        await connection.execute("DELETE FROM roblox_sessions WHERE roblox_id = $1", roblox_id)
+                        duration = (utcnow() - session_start).total_seconds()
+                        await connection.execute(
+                            "INSERT INTO roblox_time (member_id, time_spent) VALUES ($1, $2) "
+                            "ON CONFLICT (member_id) DO UPDATE SET time_spent = roblox_time.time_spent + $2",
+                            discord_id, int(duration)
+                        )
+
+                mins = int((utcnow() - session_start).total_seconds() // 60) if session_start else 0
+                async with self.db_pool.acquire() as connection:
+                    total_seconds = await connection.fetchval(
+                        "SELECT time_spent FROM roblox_time WHERE member_id=$1", discord_id
+                    ) or 0
+                weekly_minutes = total_seconds // 60
+                member = find_member(int(discord_id))
+                name = member.display_name if member else f"User {discord_id}"
+                await send_activity_embed(
+                    "🔴 Left Site",
+                    f"**{name}** ended their session. Time this session: **{mins} min**.\nThis week: **{weekly_minutes}/{WEEKLY_TIME_REQUIREMENT} min**",
+                    discord.Color.red()
+                )
+
+        return web.Response(status=200)
+
+bot = MD_BOT()
 
 # === Events ===
 @bot.event
@@ -485,7 +475,7 @@ async def on_member_update(before: discord.Member, after: discord.Member):
             )
         await log_action("Orientation Assigned", f"Member: {after.mention} • Deadline: {deadline.strftime('%Y-%m-%d %H:%M UTC')}")
 
-# === Global simplified error log for slash commands
+# Global slash error
 @bot.tree.error
 async def global_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
     try:
@@ -496,10 +486,9 @@ async def global_app_command_error(interaction: discord.Interaction, error: app_
                 await interaction.response.send_message("Sorry, something went wrong running that command.", ephemeral=True)
             except:
                 pass
-
 # === Slash Commands ===
 
-# VERIFY
+# /verify
 @bot.tree.command(name="verify", description="Link your Roblox account to the bot.")
 async def verify(interaction: discord.Interaction, roblox_username: str):
     payload = {"usernames": [roblox_username], "excludeBannedUsers": True}
@@ -524,14 +513,14 @@ async def verify(interaction: discord.Interaction, roblox_username: str):
             else:
                 await interaction.response.send_message("There was an error looking up the Roblox user.", ephemeral=True)
 
-# ANNOUNCE -> modal
+# /announce (modal)
 class AnnouncementForm(discord.ui.Modal, title='Send Announcement'):
     def __init__(self, color_obj: discord.Color):
         super().__init__()
         self.color_obj = color_obj
 
-    ann_title  = discord.ui.TextInput(label='Title',   placeholder='Announcement title', style=discord.TextStyle.short,     required=True, max_length=200)
-    ann_message= discord.ui.TextInput(label='Message', placeholder='Write your announcement here…', style=discord.TextStyle.paragraph, required=True, max_length=4000)
+    ann_title   = discord.ui.TextInput(label='Title',   placeholder='Announcement title', style=discord.TextStyle.short, required=True, max_length=200)
+    ann_message = discord.ui.TextInput(label='Message', placeholder='Write your announcement here…', style=discord.TextStyle.paragraph, required=True, max_length=4000)
 
     async def on_submit(self, interaction: discord.Interaction):
         announcement_channel = bot.get_channel(ANNOUNCEMENT_CHANNEL_ID)
@@ -563,7 +552,7 @@ async def announce(interaction: discord.Interaction, color: str = "blue"):
     color_obj = getattr(discord.Color, color, discord.Color.blue)()
     await interaction.response.send_modal(AnnouncementForm(color_obj=color_obj))
 
-# LOG task modal
+# /log (modal)
 class LogTaskForm(discord.ui.Modal, title='Add Comments (optional)'):
     def __init__(self, proof: discord.Attachment, task_type: str):
         super().__init__()
@@ -582,6 +571,7 @@ class LogTaskForm(discord.ui.Modal, title='Add Comments (optional)'):
         comments_str = self.comments.value or "No comments"
 
         async with bot.db_pool.acquire() as conn:
+            # permanent + weekly + counter
             await conn.execute(
                 "INSERT INTO task_logs (member_id, task, task_type, proof_url, comments, timestamp) "
                 "VALUES ($1, $2, $3, $4, $5, $6)",
@@ -621,7 +611,7 @@ class LogTaskForm(discord.ui.Modal, title='Add Comments (optional)'):
 async def log(interaction: discord.Interaction, task_type: str, proof: discord.Attachment):
     await interaction.response.send_modal(LogTaskForm(proof=proof, task_type=task_type))
 
-# MYTASKS
+# /mytasks
 @bot.tree.command(name="mytasks", description="Check your weekly tasks and time.")
 async def mytasks(interaction: discord.Interaction):
     member_id = interaction.user.id
@@ -636,7 +626,7 @@ async def mytasks(interaction: discord.Interaction):
         ephemeral=True
     )
 
-# VIEWTASKS
+# /viewtasks
 @bot.tree.command(name="viewtasks", description="Show a member's task totals by type (all-time).")
 async def viewtasks(interaction: discord.Interaction, member: discord.Member | None = None):
     target = member or interaction.user
@@ -654,13 +644,7 @@ async def viewtasks(interaction: discord.Interaction, member: discord.Member | N
     for r in rows:
         base = r['ttype'] or "Uncategorized"
         label = TASK_PLURALS.get(base, base + ("s" if not base.endswith("s") else ""))
-        # (typo fixed below)
-    lines = []
-    for r in rows:
-        base = r['ttype'] or "Uncategorized"
-        label = TASK_PLURALS.get(base, base + ("s" if not base.endswith("s") else ""))
         lines.append(f"**{label}** — {r['cnt']}")
-
     embed = discord.Embed(
         title=f"🗂️ Task Totals for {target.display_name}",
         description="\n".join(lines),
@@ -671,7 +655,7 @@ async def viewtasks(interaction: discord.Interaction, member: discord.Member | N
     await log_action("Viewed Tasks", f"Requester: {interaction.user.mention}\nTarget: {target.mention if target != interaction.user else 'self'}")
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
-# ADDTASK
+# /addtask (mgmt)
 @bot.tree.command(name="addtask", description="(Mgmt) Add tasks to a member's history and weekly totals.")
 @app_commands.checks.has_role(MANAGEMENT_ROLE_ID)
 @app_commands.choices(task_type=[app_commands.Choice(name=t, value=t) for t in TASK_TYPES])
@@ -684,18 +668,20 @@ async def addtask(
     proof: discord.Attachment | None = None,
 ):
     now = utcnow()
-    proof_url   = proof.url if proof else None
-    comments_val= comments or "Added by management"
+    proof_url    = proof.url if proof else None
+    comments_val = comments or "Added by management"
 
     async with bot.db_pool.acquire() as conn:
         async with conn.transaction():
             batch_rows = [(member.id, task_type, task_type, proof_url, comments_val, now)] * count
             await conn.executemany(
-                "INSERT INTO task_logs (member_id, task, task_type, proof_url, comments, timestamp) VALUES ($1, $2, $3, $4, $5, $6)",
+                "INSERT INTO task_logs (member_id, task, task_type, proof_url, comments, timestamp) "
+                "VALUES ($1, $2, $3, $4, $5, $6)",
                 batch_rows
             )
             await conn.executemany(
-                "INSERT INTO weekly_task_logs (member_id, task, task_type, proof_url, comments, timestamp) VALUES ($1, $2, $3, $4, $5, $6)",
+                "INSERT INTO weekly_task_logs (member_id, task, task_type, proof_url, comments, timestamp) "
+                "VALUES ($1, $2, $3, $4, $5, $6)",
                 batch_rows
             )
             await conn.execute(
@@ -724,7 +710,7 @@ async def addtask(
     await log_action("Tasks Added", f"By: {interaction.user.mention}\nMember: {member.mention}\nType: **{task_type}** × {count}")
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
-# LEADERBOARD (weekly)
+# /leaderboard
 @bot.tree.command(name="leaderboard", description="Displays the weekly leaderboard (tasks + on-site minutes).")
 async def leaderboard(interaction: discord.Interaction):
     async with bot.db_pool.acquire() as conn:
@@ -759,7 +745,7 @@ async def leaderboard(interaction: discord.Interaction):
     await log_action("Viewed Leaderboard", f"Requester: {interaction.user.mention}")
     await interaction.response.send_message(embed=embed)
 
-# Remove last log (mgmt)
+# /removelastlog (mgmt)
 @bot.tree.command(name="removelastlog", description="Removes the last logged task for a member.")
 @app_commands.checks.has_role(MANAGEMENT_ROLE_ID)
 async def removelastlog(interaction: discord.Interaction, member: discord.Member):
@@ -784,8 +770,7 @@ async def removelastlog(interaction: discord.Interaction, member: discord.Member
         f"Removed last weekly task for {member.mention}: '{last_log['task']}'. They now have {new_count} tasks.",
         ephemeral=True
     )
-
-# Welcome
+# /welcome
 @bot.tree.command(name="welcome", description="Sends the official welcome message.")
 @app_commands.checks.has_role(MANAGEMENT_ROLE_ID)
 async def welcome(interaction: discord.Interaction):
@@ -793,7 +778,8 @@ async def welcome(interaction: discord.Interaction):
         "Hello, congratulations on your acceptance to the **Medical Department**!\n\n"
         ":one: Review our [MD Trello](https://trello.com/b/j2jvme4Z/md-information-hub) and division hubs.\n"
         ":two: Complete your **Medical Student Orientation** within 2 weeks (book with management).\n"
-        ":three: If you want **commission**, join the [Outreach Program](https://www.roblox.com/communities/451852407/SCPF-Outreach-Program#!/about).\n"
+        ":three: If you want **commission**, join the "
+        "[Outreach Program](https://www.roblox.com/communities/451852407/SCPF-Outreach-Program#!/about).\n"
         ":four: Use **/verify** with your ROBLOX username so your on-site activity is tracked.\n\n"
         "We’re happy to have you here! 💚"
     )
@@ -804,7 +790,7 @@ async def welcome(interaction: discord.Interaction):
     await log_action("Welcome Sent", f"By: {interaction.user.mention} • Channel: {interaction.channel.mention}")
     await interaction.response.send_message("Welcome message sent!", ephemeral=True)
 
-# DM
+# /dm (mgmt)
 @bot.tree.command(name="dm", description="Sends a direct message to a member.")
 @app_commands.checks.has_role(MANAGEMENT_ROLE_ID)
 async def dm(interaction: discord.Interaction, member: discord.Member, title: str, message: str):
@@ -828,7 +814,7 @@ async def dm(interaction: discord.Interaction, member: discord.Member, title: st
         await interaction.response.send_message("An unexpected error occurred.", ephemeral=True)
         print(f"DM command error: {e}")
 
-# AA ping
+# /aa (mgmt, cooldown)
 @bot.tree.command(name="aa", description="Ping Anomaly Actors to get on-site for a checkup.")
 @app_commands.checks.has_role(MANAGEMENT_ROLE_ID)
 @app_commands.checks.cooldown(1, 300.0, key=lambda i: i.user.id)
@@ -858,16 +844,221 @@ async def aa(interaction: discord.Interaction, note: str | None = None):
     await log_action("AA Ping Sent", f"By: {interaction.user.mention}\nChannel: {target_channel.mention}")
     await interaction.response.send_message("Anomaly Actors have been pinged for a checkup.", ephemeral=True)
 
-# Orientation commands (pass/view/extend) — unchanged from your version, omitted here for brevity...
-# (Keep your passedorientation, orientationview, extendorientation as you had them.)
+# --- Orientation helpers/commands ---
+
+async def ensure_orientation_record(member: discord.Member):
+    """Ensure orientation window exists for members with MEDICAL_STUDENT_ROLE_ID."""
+    async with bot.db_pool.acquire() as conn:
+        row = await conn.fetchrow("SELECT discord_id FROM orientations WHERE discord_id = $1", member.id)
+        if row:
+            return
+        if MEDICAL_STUDENT_ROLE_ID and any(r.id == MEDICAL_STUDENT_ROLE_ID for r in member.roles):
+            assigned = utcnow()
+            deadline = assigned + datetime.timedelta(days=14)
+            await conn.execute(
+                "INSERT INTO orientations (discord_id, assigned_at, deadline, passed, warned_5d, expired_handled) "
+                "VALUES ($1, $2, $3, FALSE, FALSE, FALSE)",
+                member.id, assigned, deadline
+            )
+
+@bot.tree.command(name="passedorientation", description="(Mgmt) Mark a member as having passed orientation.")
+@app_commands.checks.has_role(MANAGEMENT_ROLE_ID)
+async def passedorientation(interaction: discord.Interaction, member: discord.Member):
+    assigned = utcnow()
+    deadline = assigned + datetime.timedelta(days=14)
+    passed_at = assigned
+    async with bot.db_pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO orientations (discord_id, assigned_at, deadline, passed, passed_at, warned_5d, expired_handled)
+            VALUES ($1, $2, $3, TRUE, $4, TRUE, TRUE)
+            ON CONFLICT (discord_id)
+            DO UPDATE SET
+                passed = TRUE,
+                passed_at = EXCLUDED.passed_at,
+                warned_5d = TRUE,
+                expired_handled = TRUE
+            """,
+            member.id, assigned, deadline, passed_at
+        )
+    await log_action("Orientation Passed", f"Member: {member.mention}\nBy: {interaction.user.mention}")
+    await interaction.response.send_message(f"Marked {member.mention} as **passed orientation**.", ephemeral=True)
+
+@bot.tree.command(name="orientationview", description="View a member's orientation status.")
+async def orientationview(interaction: discord.Interaction, member: discord.Member | None = None):
+    target = member or interaction.user
+    await ensure_orientation_record(target)
+    async with bot.db_pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT assigned_at, deadline, passed, passed_at FROM orientations WHERE discord_id = $1",
+            target.id
+        )
+    if not row:
+        await interaction.response.send_message(f"No orientation record for {target.display_name}.", ephemeral=True)
+        return
+    if row["passed"]:
+        when = row["passed_at"].strftime("%Y-%m-%d %H:%M UTC") if row["passed_at"] else "unknown time"
+        msg = f"**{target.display_name}**: ✅ Passed orientation (at {when})."
+    else:
+        remaining = row["deadline"] - utcnow()
+        pretty = human_remaining(remaining)
+        msg = (
+            f"**{target.display_name}**: ❌ Not passed.\n"
+            f"Deadline: **{row['deadline'].strftime('%Y-%m-%d %H:%M UTC')}** "
+            f"(**{pretty}** remaining)"
+        )
+    await log_action("Orientation Viewed", f"Requester: {interaction.user.mention}\nTarget: {target.mention if target != interaction.user else 'self'}")
+    await interaction.response.send_message(msg, ephemeral=True)
+
+@bot.tree.command(name="extendorientation", description="(Mgmt) Extend a member's orientation deadline by N days.")
+@app_commands.checks.has_role(MANAGEMENT_ROLE_ID)
+async def extendorientation(interaction: discord.Interaction, member: discord.Member, days: app_commands.Range[int, 1, 60], reason: str | None = None):
+    await ensure_orientation_record(member)
+    async with bot.db_pool.acquire() as conn:
+        row = await conn.fetchrow("SELECT deadline, passed FROM orientations WHERE discord_id = $1", member.id)
+        if not row:
+            await interaction.response.send_message(f"No orientation record for {member.display_name} and they are not a Medical Student.", ephemeral=True)
+            return
+        if row["passed"]:
+            await interaction.response.send_message(f"{member.display_name} already passed orientation.", ephemeral=True)
+            return
+        new_deadline = (row["deadline"] or utcnow()) + datetime.timedelta(days=days)
+        await conn.execute("UPDATE orientations SET deadline = $1 WHERE discord_id = $2", new_deadline, member.id)
+
+    await log_action("Orientation Deadline Extended",
+                     f"Member: {member.mention}\nAdded: **{days}** day(s)\nNew deadline: **{new_deadline.strftime('%Y-%m-%d %H:%M UTC')}**\nReason: {reason or '—'}")
+    await interaction.response.send_message(
+        f"Extended {member.mention}'s orientation by **{days}** day(s). New deadline: **{new_deadline.strftime('%Y-%m-%d %H:%M UTC')}**.",
+        ephemeral=True
+    )
+
+# --- Strike helpers/commands ---
+
+async def issue_strike(member: discord.Member, reason: str, *, set_by: int | None, auto: bool) -> int:
+    """Create a strike, DM the user, return active strike count after this new strike."""
+    now = utcnow()
+    expires = now + datetime.timedelta(days=90)
+    async with bot.db_pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO strikes (member_id, reason, issued_at, expires_at, set_by, auto) "
+            "VALUES ($1, $2, $3, $4, $5, $6)",
+            member.id, reason, now, expires, set_by, auto
+        )
+        active = await conn.fetchval("SELECT COUNT(*) FROM strikes WHERE member_id=$1 AND expires_at > $2", member.id, now)
+
+    # DM
+    try:
+        await member.send(
+            f"You've received a strike for failing to complete your weekly quota. "
+            f"This will expire on **{expires.strftime('%Y-%m-%d')}**. "
+            f"(**{active}/3 strikes**)"
+        )
+    except:
+        pass
+
+    await log_action("Strike Issued", f"Member: {member.mention}\nReason: {reason}\nAuto: {auto}\nActive now: **{active}/3**")
+    return active
+
+async def enforce_three_strikes(member: discord.Member):
+    """Kick from Roblox (if connected) and Discord, DM, and log."""
+    try:
+        await member.send("You've been automatically removed from the Medical Department for reaching **3/3 strikes**.")
+    except:
+        pass
+
+    roblox_removed = await try_remove_from_roblox(member.id)
+
+    kicked = False
+    try:
+        await member.kick(reason="Reached 3/3 strikes — automatic removal.")
+        kicked = True
+    except Exception as e:
+        print(f"Kick failed for {member.id}: {e}")
+
+    await log_action("Three-Strike Removal",
+                     f"Member: {member.mention}\nRoblox removal: {'✅' if roblox_removed else '❌/N/A'}\nDiscord kick: {'✅' if kicked else '❌'}")
+
+@bot.tree.command(name="strikes_add", description="(Mgmt) Add a strike to a member.")
+@app_commands.checks.has_role(MANAGEMENT_ROLE_ID)
+async def strikes_add(interaction: discord.Interaction, member: discord.Member, reason: str):
+    active_after = await issue_strike(member, reason, set_by=interaction.user.id, auto=False)
+    if active_after >= 3:
+        await enforce_three_strikes(member)
+    await interaction.response.send_message(f"Strike added to {member.mention}. Active strikes: **{active_after}/3**.", ephemeral=True)
+
+@bot.tree.command(name="strikes_remove", description="(Mgmt) Remove N active strikes from a member (earliest expiring first).")
+@app_commands.checks.has_role(MANAGEMENT_ROLE_ID)
+async def strikes_remove(interaction: discord.Interaction, member: discord.Member, count: app_commands.Range[int, 1, 10] = 1):
+    now = utcnow()
+    async with bot.db_pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT strike_id FROM strikes WHERE member_id=$1 AND expires_at > $2 ORDER BY expires_at ASC LIMIT $3",
+            member.id, now, count
+        )
+        if not rows:
+            await interaction.response.send_message(f"{member.display_name} has no active strikes.", ephemeral=True)
+            return
+        ids = [r['strike_id'] for r in rows]
+        await conn.execute("DELETE FROM strikes WHERE strike_id = ANY($1::int[])", ids)
+        remaining = await conn.fetchval("SELECT COUNT(*) FROM strikes WHERE member_id=$1 AND expires_at > $2", member.id, now)
+    await log_action("Strikes Removed", f"Member: {member.mention}\nRemoved: **{len(ids)}**\nActive remaining: **{remaining}/3**")
+    await interaction.response.send_message(f"Removed **{len(ids)}** strike(s) from {member.mention}. Active remaining: **{remaining}/3**.", ephemeral=True)
+
+@bot.tree.command(name="strikes_view", description="View a member's active and total strikes.")
+async def strikes_view(interaction: discord.Interaction, member: discord.Member | None = None):
+    target = member or interaction.user
+    now = utcnow()
+    async with bot.db_pool.acquire() as conn:
+        active_rows = await conn.fetch("SELECT reason, expires_at, issued_at, auto FROM strikes WHERE member_id=$1 AND expires_at > $2 ORDER BY expires_at ASC", target.id, now)
+        total = await conn.fetchval("SELECT COUNT(*) FROM strikes WHERE member_id=$1", target.id)
+    if not active_rows:
+        desc = f"**Active strikes:** 0/3\n**Total strikes ever:** {total}"
+    else:
+        lines = [f"• {r['reason']} — expires **{r['expires_at'].strftime('%Y-%m-%d')}** ({'auto' if r['auto'] else 'manual'})" for r in active_rows]
+        desc = f"**Active strikes:** {len(active_rows)}/3\n" + "\n".join(lines) + f"\n\n**Total strikes ever:** {total}"
+    embed = discord.Embed(title=f"Strikes for {target.display_name}", description=desc, color=discord.Color.orange(), timestamp=utcnow())
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+# === Activity Excuse commands ===
+@bot.tree.command(name="activityexcuse", description="(Mgmt) Set or clear a weekly activity excuse (no strikes for that week).")
+@app_commands.checks.has_role(MANAGEMENT_ROLE_ID)
+@app_commands.describe(action="set or clear", week="ISO week like 2025-W39; default = current week", reason="Required when action=set")
+async def activityexcuse(
+    interaction: discord.Interaction,
+    action: str = "set",
+    week: str | None = None,
+    reason: str | None = None
+):
+    wk = (week or week_key()).upper()
+    if action not in ("set", "clear"):
+        await interaction.response.send_message("Action must be `set` or `clear`.", ephemeral=True)
+        return
+
+    async with bot.db_pool.acquire() as conn:
+        if action == "set":
+            if not reason:
+                await interaction.response.send_message("Please include a reason when setting an excuse.", ephemeral=True)
+                return
+            await conn.execute(
+                "INSERT INTO activity_excuses (week_key, reason, set_by, set_at) VALUES ($1, $2, $3, $4) "
+                "ON CONFLICT (week_key) DO UPDATE SET reason=EXCLUDED.reason, set_by=EXCLUDED.set_by, set_at=EXCLUDED.set_at",
+                wk, reason, interaction.user.id, utcnow()
+            )
+            await log_action("Activity Excuse Set", f"Week: **{wk}**\nBy: {interaction.user.mention}\nReason: {reason}")
+            await interaction.response.send_message(f"Activity excuse **set** for week **{wk}**.", ephemeral=True)
+        else:
+            await conn.execute("DELETE FROM activity_excuses WHERE week_key=$1", wk)
+            await log_action("Activity Excuse Cleared", f"Week: **{wk}**\nBy: {interaction.user.mention}")
+            await interaction.response.send_message(f"Activity excuse **cleared** for week **{wk}**.", ephemeral=True)
 
 # === Weekly task summary + strikes + reset ===
 @tasks.loop(time=datetime.time(hour=4, minute=0, tzinfo=datetime.timezone.utc))
 async def check_weekly_tasks():
+    # Only fire on Sunday UTC
     if utcnow().weekday() != 6:
         return
 
     wk = week_key()
+    # If excused week, we still post the report but we **do not issue strikes**
     async with bot.db_pool.acquire() as conn:
         is_excused_row = await conn.fetchrow("SELECT week_key, reason FROM activity_excuses WHERE week_key=$1", wk)
     excused_reason = is_excused_row["reason"] if is_excused_row else None
@@ -887,7 +1078,8 @@ async def check_weekly_tasks():
 
     async with bot.db_pool.acquire() as conn:
         all_tasks = await conn.fetch("SELECT member_id, tasks_completed FROM weekly_tasks")
-        all_time  = await conn.fetch("SELECT member_id, time_spent FROM roblox_time")
+        all_time = await conn.fetch("SELECT member_id, time_spent FROM roblox_time")
+        # Pull active strikes counts for all dept members
         strike_counts = {
             r['member_id']: r['cnt'] for r in await conn.fetch(
                 "SELECT member_id, COUNT(*) as cnt FROM strikes WHERE expires_at > $1 GROUP BY member_id",
@@ -896,7 +1088,7 @@ async def check_weekly_tasks():
         }
 
     tasks_map = {r['member_id']: r['tasks_completed'] for r in all_tasks if r['member_id'] in dept_member_ids}
-    time_map  = {r['member_id']: r['time_spent'] for r in all_time  if r['member_id'] in dept_member_ids}
+    time_map = {r['member_id']: r['time_spent'] for r in all_time if r['member_id'] in dept_member_ids}
 
     met, not_met, zero = [], [], []
     considered_ids = set(tasks_map.keys()) | set(time_map.keys())
@@ -920,6 +1112,7 @@ async def check_weekly_tasks():
             sc = strike_counts.get(mid, 0)
             zero.append((member, sc))
 
+    # Post report
     def fmt_met(lst):
         return ", ".join(f"{m.mention} (strikes: {sc})" for m, sc in lst) if lst else "—"
 
@@ -945,6 +1138,7 @@ async def check_weekly_tasks():
         footer_text=None
     )
 
+    # Issue strikes for not-met (if NOT excused)
     if not excused_reason:
         for m, t, mins, _sc in not_met + [(m, 0, 0, sc) for m, sc in zero]:
             try:
@@ -956,12 +1150,12 @@ async def check_weekly_tasks():
             except Exception as e:
                 print(f"Strike flow error for {getattr(m, 'id', 'unknown')}: {e}")
 
+    # Reset weekly tables
     async with bot.db_pool.acquire() as conn:
         await conn.execute("TRUNCATE TABLE weekly_tasks, weekly_task_logs, roblox_time, roblox_sessions")
     print("Weekly tasks and time checked and reset.")
 
-# Orientation reminder loop — keep your versions of passedorientation/orientationview/extendorientation here (unchanged)
-
+# Orientation 5-day warning + overdue enforcement
 @tasks.loop(minutes=30)
 async def orientation_reminder_loop():
     try:
@@ -985,6 +1179,7 @@ async def orientation_reminder_loop():
 
             remaining = deadline - now
 
+            # 5-day warning
             if (not warned) and datetime.timedelta(days=4, hours=23) <= remaining <= datetime.timedelta(days=5, hours=1):
                 if alert_channel:
                     member = find_member(discord_id)
@@ -996,6 +1191,7 @@ async def orientation_reminder_loop():
                         async with bot.db_pool.acquire() as conn2:
                             await conn2.execute("UPDATE orientations SET warned_5d = TRUE WHERE discord_id = $1", discord_id)
 
+            # Overdue enforcement (only once)
             if remaining <= datetime.timedelta(seconds=0) and not expired_handled:
                 member = find_member(discord_id)
                 if member:
@@ -1010,12 +1206,12 @@ async def orientation_reminder_loop():
 
                     roblox_removed = await try_remove_from_roblox(discord_id)
 
-                    kicked = False
                     try:
                         await member.kick(reason="Orientation deadline expired — automatic removal.")
                         kicked = True
                     except Exception as e:
                         print(f"Kick failed for {member.id}: {e}")
+                        kicked = False
 
                     await log_action(
                         "Orientation Expiry Enforced",
@@ -1050,22 +1246,26 @@ async def group_role_autocomplete(interaction: discord.Interaction, current: str
 @app_commands.checks.has_role(RANK_MANAGER_ROLE_ID)
 @app_commands.autocomplete(group_role=group_role_autocomplete)
 async def rank(interaction: discord.Interaction, member: discord.Member, group_role: str):
+    # Resolve roblox_id
     async with bot.db_pool.acquire() as conn:
         roblox_id = await conn.fetchval("SELECT roblox_id FROM roblox_verification WHERE discord_id = $1", member.id)
     if not roblox_id:
         await interaction.response.send_message(f"{member.display_name} hasn’t linked a Roblox account with `/verify` yet.", ephemeral=True)
         return
 
+    # Fetch ranks from the service
     ranks = await fetch_group_ranks()
     if not ranks:
         await interaction.response.send_message("Couldn’t fetch Roblox group ranks. Check ROBLOX_SERVICE_BASE & secret.", ephemeral=True)
         return
 
+    # Find by name (case-insensitive)
     target = next((r for r in ranks if r.get('name','').lower() == group_role.lower()), None)
     if not target:
         await interaction.response.send_message("That rank wasn’t found. Try typing to see suggestions.", ephemeral=True)
         return
 
+    # Remove previous Discord role that matches stored rank, then set new
     try:
         prev_rank = None
         async with bot.db_pool.acquire() as conn:
@@ -1078,11 +1278,13 @@ async def rank(interaction: discord.Interaction, member: discord.Member, group_r
     except Exception as e:
         print(f"/rank remove old role error: {e}")
 
+    # Set Roblox rank via service
     ok = await set_group_rank(int(roblox_id), role_id=int(target['id']))
     if not ok:
         await interaction.response.send_message("Failed to set Roblox rank (service error).", ephemeral=True)
         return
 
+    # Store in DB
     async with bot.db_pool.acquire() as conn:
         await conn.execute(
             "INSERT INTO member_ranks (discord_id, rank, set_by, set_at) VALUES ($1, $2, $3, $4) "
@@ -1090,6 +1292,7 @@ async def rank(interaction: discord.Interaction, member: discord.Member, group_r
             member.id, target['name'], interaction.user.id, utcnow()
         )
 
+    # Assign matching Discord role if present
     assigned_role = None
     try:
         for role in interaction.guild.roles:
