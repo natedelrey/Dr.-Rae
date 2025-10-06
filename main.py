@@ -653,7 +653,7 @@ async def viewtasks(interaction: discord.Interaction, member: discord.Member | N
     lines = []
     for r in rows:
         base = r['ttype'] or "Uncategorized"
-        label = TASK_PLURALS.get(base, base + ("s" if not base.endswith("s") else "")))
+        label = TASK_PLURALS.get(base, base + ("s" if not base.endswith("s") else ""))
         # (typo fixed below)
     lines = []
     for r in rows:
