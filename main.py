@@ -776,13 +776,27 @@ async def removelastlog(interaction: discord.Interaction, member: discord.Member
 async def welcome(interaction: discord.Interaction):
     msg = (
         "Hello, congratulations on your acceptance to the **Medical Department**!\n\n"
-        ":one: Review our [MD Trello](https://trello.com/b/j2jvme4Z/md-information-hub) and division hubs.\n"
-        ":two: Complete your **Medical Student Orientation** within 2 weeks (book with management).\n"
-        ":three: If you want **commission**, join the "
-        "[Outreach Program](https://www.roblox.com/communities/451852407/SCPF-Outreach-Program#!/about).\n"
-        ":four: Use **/verify** with your ROBLOX username so your on-site activity is tracked.\n\n"
-        "We’re happy to have you here! 💚"
+        ":one: Before you jump into anything, be sure that you familiarize yourself with our central "
+        "[MD Trello](https://trello.com/b/j2jvme4Z/md-information-hub) and also it's subsidiary divisions like the "
+        "[Pathology Hub](https://trello.com/b/QPD3QshW/md-pathology-hub) and the "
+        "[Psychology Hub](https://trello.com/b/B6eHAvEN/md-psychology-hub).\n"
+        ">  :information_source:  Even if you aren't apart of these specializations yet, it's good to know what they do "
+        "because each focus on a critical component in your MD gameplay.\n\n"
+        ":two: After you've reviewed our guidelines, focus on getting your **Medical Student Orientation** completed. "
+        ":calendar_spiral: These are 20 minute sessions that **have to be completed** within your first 2 weeks of entry "
+        "and can be booked with any member of management.\n\n"
+        ":three: If you are interested in receiving **commission** for your medical duty :money_with_wings:, we offer a "
+        "[Medical Outreach Program](https://www.roblox.com/communities/451852407/SCPF-Outreach-Program#!/about) that conducts payouts.\n"
+        "> :information_source: If are applying to MD to receive the recent **sign-on bonus** advertisement, this is a critical "
+        "step to ensure you receive your payout.\n\n"
+        ":four: Familiarize yourself with myself—Dr. Rae! I will serve as your medical AI assistant throughout our journey, "
+        "and you'll have to learn a few of my important commands if you want to succeed. :checkered_flag: The first step we'll "
+        "take together is my **/verify** command with your ROBLOX username—this is to ensure your on-site activity is *always* "
+        "accurately tracked.\n\n"
+        "That's all for now, if you have any questions at all just message any management member or even your peers! "
+        "We're happy to have you here :sparkling_heart:"
     )
+
     embed = discord.Embed(title="Welcome to the Team!", description=msg, color=discord.Color.green())
     embed.set_footer(text="Best,\nThe Medical Department Management Team")
 
