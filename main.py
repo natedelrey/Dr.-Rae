@@ -71,6 +71,10 @@ if ROBLOX_REMOVE_URL and not ROBLOX_REMOVE_URL.startswith("http"):
 ROBLOX_REMOVE_SECRET = os.getenv("ROBLOX_REMOVE_SECRET") or None
 ROBLOX_GROUP_ID      = os.getenv("ROBLOX_GROUP_ID") or None  # optional, forwarded if present
 
+# Roblox rank configuration for automatic onboarding
+AUTO_ACCEPT_GROUP_ROLE_NAME   = os.getenv("AUTO_ACCEPT_GROUP_ROLE_NAME") or None
+AUTO_ACCEPT_GROUP_RANK_NUMBER = getenv_int("AUTO_ACCEPT_GROUP_RANK_NUMBER")
+
 # Rank manager role (can run /rank)
 RANK_MANAGER_ROLE_ID = getenv_int("RANK_MANAGER_ROLE_ID", 1405979816120942702)
 
@@ -345,6 +349,20 @@ async def set_group_rank(roblox_id: int, role_id: int = None, rank_number: int =
     except Exception as e:
         print(f"set_group_rank error: {e}")
         return False
+
+# Helper to map Roblox rank names from the service
+async def find_group_role_by_name(name: str) -> dict | None:
+    if not name:
+        return None
+    roles = await fetch_group_ranks()
+    if not roles:
+        return None
+    name_lower = name.lower()
+    for role in roles:
+        role_name = str(role.get("name", ""))
+        if role_name.lower() == name_lower:
+            return role
+    return None
 
 # >>> NEW: accept join + ensure member+rank helpers <<<
 async def accept_group_join(roblox_id: int) -> bool:
@@ -1158,13 +1176,38 @@ async def handle_accept(interaction: discord.Interaction, discord_id: int, answe
                             )
                         await log_action("Auto Verified", f"User: <@{discord_id}> | Roblox: `{roblox_name}` ({roblox_id})")
 
-    # Accept join request if pending, then rank to Medical Student (rankNumber=1 by assumption)
+    # Accept join request if pending, then rank to the configured Roblox group role
     if roblox_id:
-        ok = await ensure_member_and_rank(int(roblox_id), rank_number=1)
+        target_role = None
+        ensure_kwargs: dict[str, int] = {}
+        if AUTO_ACCEPT_GROUP_ROLE_NAME:
+            target_role = await find_group_role_by_name(AUTO_ACCEPT_GROUP_ROLE_NAME)
+            if not target_role:
+                print(f"[WARN] Auto-accept Roblox role '{AUTO_ACCEPT_GROUP_ROLE_NAME}' not found in group ranks.")
+            elif target_role.get("id"):
+                try:
+                    ensure_kwargs["role_id"] = int(target_role["id"])
+                except Exception:
+                    pass
+
+        if not ensure_kwargs:
+            rank_value = None
+            if target_role is not None:
+                rank_value = target_role.get("rank") if target_role.get("rank") is not None else target_role.get("rankNumber")
+            if rank_value is None and AUTO_ACCEPT_GROUP_RANK_NUMBER is not None:
+                rank_value = AUTO_ACCEPT_GROUP_RANK_NUMBER
+            if rank_value is None:
+                rank_value = 1  # maintain previous default behaviour
+            try:
+                ensure_kwargs["rank_number"] = int(rank_value)
+            except Exception:
+                pass
+
+        ok = await ensure_member_and_rank(int(roblox_id), **ensure_kwargs)
         if not ok:
             # fallback: accept then rank separately
             await accept_group_join(int(roblox_id))
-            await set_group_rank(int(roblox_id), rank_number=1)
+            await set_group_rank(int(roblox_id), **ensure_kwargs)
 
     # Assign Discord roles
     role_ids = [rid for rid in [MEDICAL_STUDENT_ROLE_ID, *APPLICATION_EXTRA_ROLE_IDS] if rid]
