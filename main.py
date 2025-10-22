@@ -1,4 +1,5 @@
-# main.py  (Medical Department bot)
+# main.py  (Medical Department bot) — PART 1/3
+# NOTE: Paste this as the top of your main.py. I will send Parts 2 and 3 after you reply "next".
 
 import discord
 from discord.ext import commands, tasks
@@ -11,6 +12,9 @@ from aiohttp import web
 from discord import app_commands
 import asyncio
 from urllib.parse import urlparse
+import json
+import textwrap
+from typing import Optional, Any
 
 # === Configuration ===
 load_dotenv()
@@ -40,6 +44,11 @@ COMMS_CHANNEL_ID             = getenv_int("COMMS_CHANNEL_ID")
 DATABASE_URL   = os.getenv("DATABASE_URL")
 API_SECRET_KEY = os.getenv("API_SECRET_KEY")  # for /roblox webhook auth
 
+# AI (application review)
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")  # use OpenAI-compatible endpoint
+AI_MODEL       = os.getenv("AI_MODEL", "gpt-4o-mini")  # lightweight, change as you like
+AI_BASE_URL    = os.getenv("AI_BASE_URL", "https://api.openai.com/v1")
+
 def _normalize_base(url: str | None) -> str | None:
     if not url:
         return None
@@ -57,6 +66,9 @@ ROBLOX_GROUP_ID      = os.getenv("ROBLOX_GROUP_ID") or None  # optional, forward
 
 # Rank manager role (can run /rank)
 RANK_MANAGER_ROLE_ID = getenv_int("RANK_MANAGER_ROLE_ID", 1405979816120942702)
+
+# Staff role (can view/override application queue)
+STAFF_ROLE_ID = getenv_int("STAFF_ROLE_ID", (MANAGEMENT_ROLE_ID or 0))
 
 # Weekly configs
 WEEKLY_REQUIREMENT      = int(os.getenv("WEEKLY_REQUIREMENT", "3"))
@@ -83,6 +95,56 @@ TASK_PLURALS = {
     "Anomaly Checkup": "Anomaly Checkups",
     "Medical Department Recruitment": "Medical Department Recruitments",
 }
+
+# === Application System Config ===
+APPLICATION_AUTO_ACCEPT_THRESHOLD = float(os.getenv("APPLICATION_AUTO_ACCEPT_THRESHOLD", "80"))
+APPLICATION_BORDERLINE_MIN        = float(os.getenv("APPLICATION_BORDERLINE_MIN", "65"))
+APPLICATION_TIMEOUT_MINUTES       = int(os.getenv("APPLICATION_TIMEOUT_MINUTES", "20"))  # idle per step
+APPLICATION_COOLDOWN_HOURS        = int(os.getenv("APPLICATION_COOLDOWN_HOURS", "24"))   # after decision
+
+# The core questions for the MD application (order matters)
+APPLICATION_QUESTIONS: list[dict[str, Any]] = [
+    {
+        "code": "roblox_username",
+        "prompt": "What is your exact Roblox username? (Case-sensitive, please double-check.)",
+        "type": "short",
+        "required": True,
+        "min_len": 3,
+        "max_len": 32
+    },
+    {
+        "code": "availability",
+        "prompt": "How many hours a week can you actively participate with the Medical Department? Be honest.",
+        "type": "short",
+        "required": True,
+        "min_len": 1,
+        "max_len": 200
+    },
+    {
+        "code": "experience",
+        "prompt": "Share any relevant experience: groups, roles, medical RP, or responsibilities you’ve handled.",
+        "type": "long",
+        "required": True,
+        "min_len": 50,
+        "max_len": 1200
+    },
+    {
+        "code": "communication",
+        "prompt": "Describe your communication style (concise, detailed, patient, etc.) and how you handle conflicts.",
+        "type": "long",
+        "required": True,
+        "min_len": 50,
+        "max_len": 1200
+    },
+    {
+        "code": "policy",
+        "prompt": "Pick one MD guideline you think is crucial and explain why it matters in practice.",
+        "type": "long",
+        "required": True,
+        "min_len": 50,
+        "max_len": 1200
+    }
+]
 
 def utcnow():
     return datetime.datetime.now(datetime.timezone.utc)
@@ -152,7 +214,7 @@ async def log_action(title: str, description: str):
     embed = discord.Embed(title=title, description=description, color=discord.Color.dark_gray(), timestamp=utcnow())
     await ch.send(embed=embed)
 
-def find_member(discord_id: int) -> discord.Member | None:
+def find_member(discord_id: int) -> Optional[discord.Member]:
     for g in bot.guilds:
         m = g.get_member(discord_id)
         if m:
@@ -246,11 +308,74 @@ async def set_group_rank(roblox_id: int, role_id: int = None, rank_number: int =
         print(f"set_group_rank error: {e}")
         return False
 
+# === Minimal OpenAI client for rubric-based review ===
+class SimpleOpenAI:
+    def __init__(self, api_key: str, base_url: str):
+        self.api_key = api_key
+        self.base_url = base_url.rstrip("/")
+
+    async def score_application(self, answers: dict[str, str]) -> dict:
+        """
+        Call Chat Completions with a strict JSON schema for:
+        overall_score (0-100), verdict, dimension scores, rationale, flags[].
+        """
+        system = "You are a fair and strict reviewer for Medical Department applications. Output only valid JSON."
+        user_content = {
+            "instructions": "Score this applicant using the rubric. Return strict JSON (no prose).",
+            "rubric": {
+                "dimensions": {
+                    "commitment": "Evidence of availability/consistency",
+                    "clarity": "Clear writing and coherent reasoning",
+                    "experience": "Relevant past roles/responsibility fit",
+                    "professionalism": "Tone, maturity, no toxicity",
+                    "policy": "Understands and respects guidelines"
+                },
+                "weights": {"commitment": 0.25, "clarity": 0.20, "experience": 0.25, "professionalism": 0.15, "policy": 0.15},
+                "output_schema": {
+                    "overall_score": "number 0..100",
+                    "verdict": "accept|borderline|reject",
+                    "dimension_scores": {"commitment": 0, "clarity": 0, "experience": 0, "professionalism": 0, "policy": 0},
+                    "rationale": "string",
+                    "flags": ["optional string flags like 'toxicity' or 'plagiarism_suspected'"]
+                }
+            },
+            "answers": answers
+        }
+        # Compose payload for Chat Completions
+        payload = {
+            "model": AI_MODEL,
+            "response_format": {"type": "json_object"},
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": json.dumps(user_content)}
+            ],
+            "temperature": 0.2
+        }
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json"
+        }
+        url = f"{self.base_url}/chat/completions"
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, headers=headers, json=payload, timeout=60) as resp:
+                txt = await resp.text()
+                if resp.status // 100 != 2:
+                    raise RuntimeError(f"AI review failed {resp.status}: {txt}")
+                data = json.loads(txt)
+                content = data["choices"][0]["message"]["content"]
+                try:
+                    return json.loads(content)
+                except Exception:
+                    # Fallback: try to strip code fences or trailing text
+                    cleaned = content.strip().strip("`")
+                    return json.loads(cleaned)
+
 # === Bot class ===
 class MD_BOT(commands.Bot):
     def __init__(self):
         super().__init__(command_prefix='!', intents=intents)
-        self.db_pool = None
+        self.db_pool: Optional[asyncpg.Pool] = None
+        self.ai = SimpleOpenAI(OPENAI_API_KEY or "", AI_BASE_URL)
 
     async def setup_hook(self):
         # DB pool
@@ -265,6 +390,7 @@ class MD_BOT(commands.Bot):
 
         # Schema (create/ensure)
         async with self.db_pool.acquire() as connection:
+            # Existing tables
             await connection.execute('''
                 CREATE TABLE IF NOT EXISTS weekly_tasks (
                     member_id BIGINT PRIMARY KEY,
@@ -322,7 +448,6 @@ class MD_BOT(commands.Bot):
                     expired_handled BOOLEAN DEFAULT FALSE
                 );
             ''')
-            # Strike system (create BEFORE altering)
             await connection.execute('''
                 CREATE TABLE IF NOT EXISTS strikes (
                     strike_id SERIAL PRIMARY KEY,
@@ -335,13 +460,11 @@ class MD_BOT(commands.Bot):
                 );
             ''')
 
-            # --- Safe ALTERs for older DBs (fixes UndefinedColumnError) ---
+            # Safety ALTERs for legacy DBs
             await connection.execute("ALTER TABLE weekly_task_logs ADD COLUMN IF NOT EXISTS task TEXT;")
             await connection.execute("ALTER TABLE task_logs ADD COLUMN IF NOT EXISTS task TEXT;")
             await connection.execute("UPDATE weekly_task_logs SET task = COALESCE(task, task_type) WHERE task IS NULL;")
             await connection.execute("UPDATE task_logs SET task = COALESCE(task, task_type) WHERE task IS NULL;")
-
-            # Ensure safety columns exist
             await connection.execute("ALTER TABLE orientations ADD COLUMN IF NOT EXISTS passed_at TIMESTAMPTZ;")
             await connection.execute("ALTER TABLE orientations ADD COLUMN IF NOT EXISTS warned_5d BOOLEAN DEFAULT FALSE;")
             await connection.execute("ALTER TABLE orientations ADD COLUMN IF NOT EXISTS expired_handled BOOLEAN DEFAULT FALSE;")
@@ -373,6 +496,81 @@ class MD_BOT(commands.Bot):
                     expires_at TIMESTAMPTZ
                 );
             ''')
+
+            # === New: Application system tables ===
+            await connection.execute('''
+                CREATE TABLE IF NOT EXISTS applicants (
+                    id BIGSERIAL PRIMARY KEY,
+                    discord_id BIGINT UNIQUE NOT NULL,
+                    roblox_username TEXT,
+                    roblox_user_id BIGINT,
+                    status TEXT NOT NULL DEFAULT 'in_progress', -- in_progress|submitted|accepted|rejected
+                    created_at TIMESTAMPTZ DEFAULT now(),
+                    updated_at TIMESTAMPTZ DEFAULT now(),
+                    last_active TIMESTAMPTZ DEFAULT now(),
+                    cooldown_until TIMESTAMPTZ
+                );
+            ''')
+            await connection.execute('''
+                CREATE TABLE IF NOT EXISTS application_runs (
+                    id BIGSERIAL PRIMARY KEY,
+                    applicant_id BIGINT REFERENCES applicants(id) ON DELETE CASCADE,
+                    started_at TIMESTAMPTZ DEFAULT now(),
+                    submitted_at TIMESTAMPTZ
+                );
+            ''')
+            await connection.execute('''
+                CREATE TABLE IF NOT EXISTS questions (
+                    id SERIAL PRIMARY KEY,
+                    code TEXT UNIQUE NOT NULL,
+                    prompt TEXT NOT NULL,
+                    type TEXT NOT NULL,
+                    order_index INT NOT NULL
+                );
+            ''')
+            await connection.execute('''
+                CREATE TABLE IF NOT EXISTS answers (
+                    id BIGSERIAL PRIMARY KEY,
+                    run_id BIGINT REFERENCES application_runs(id) ON DELETE CASCADE,
+                    question_code TEXT NOT NULL,
+                    answer_text TEXT,
+                    created_at TIMESTAMPTZ DEFAULT now()
+                );
+            ''')
+            await connection.execute('''
+                CREATE TABLE IF NOT EXISTS ai_reviews (
+                    id BIGSERIAL PRIMARY KEY,
+                    run_id BIGINT REFERENCES application_runs(id) ON DELETE CASCADE,
+                    model TEXT NOT NULL,
+                    score NUMERIC(5,2),
+                    verdict TEXT,
+                    rationale TEXT,
+                    tokens_in INT,
+                    tokens_out INT,
+                    created_at TIMESTAMPTZ DEFAULT now()
+                );
+            ''')
+            await connection.execute('''
+                CREATE TABLE IF NOT EXISTS decisions (
+                    id BIGSERIAL PRIMARY KEY,
+                    run_id BIGINT REFERENCES application_runs(id) ON DELETE CASCADE,
+                    decided_by TEXT NOT NULL,  -- 'ai' or 'staff:<discord_id>'
+                    decision TEXT NOT NULL,    -- accept|reject
+                    reason TEXT,
+                    created_at TIMESTAMPTZ DEFAULT now()
+                );
+            ''')
+
+            # Seed/refresh "questions" ordering to match APPLICATION_QUESTIONS
+            for idx, q in enumerate(APPLICATION_QUESTIONS):
+                await connection.execute(
+                    """
+                    INSERT INTO questions (code, prompt, type, order_index)
+                    VALUES ($1, $2, $3, $4)
+                    ON CONFLICT (code) DO UPDATE SET prompt = EXCLUDED.prompt, type = EXCLUDED.type, order_index = EXCLUDED.order_index
+                    """,
+                    q["code"], q["prompt"], q["type"], idx
+                )
 
         print("[DB] Tables ready.")
 
@@ -456,8 +654,10 @@ class MD_BOT(commands.Bot):
 
         return web.Response(status=200)
 
+
 bot = MD_BOT()
 
+# Pre-create command groups (kept from your original)
 tasks_group = app_commands.Group(name="tasks", description="Commands for tracking Medical Department tasks.")
 orientation_group = app_commands.Group(name="orientation", description="Manage member orientation progress.")
 strikes_group = app_commands.Group(name="strikes", description="Manage member strikes.")
@@ -488,7 +688,7 @@ async def on_member_update(before: discord.Member, after: discord.Member):
             )
         await log_action("Orientation Assigned", f"Member: {after.mention} • Deadline: {deadline.strftime('%Y-%m-%d %H:%M UTC')}")
 
-# Global slash error
+# Global slash error (kept)
 @bot.tree.error
 async def global_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
     try:
@@ -499,7 +699,12 @@ async def global_app_command_error(interaction: discord.Interaction, error: app_
                 await interaction.response.send_message("Sorry, something went wrong running that command.", ephemeral=True)
             except:
                 pass
-# === Slash Commands ===
+
+# === PART 1/3 END ===
+# Reply "next" and I'll send PART 2/3 with: /verify, announcements, tasks, orientation, strikes, excuses (your original commands retained),
+# plus the entire new /apply wizard views, AI review, auto-verify, auto-rank, and welcome flow.
+# main.py (Medical Department bot) — PART 2/3
+# Continues directly from Part 1 — includes original slash commands + new /apply workflow
 
 # /verify
 @bot.tree.command(name="verify", description="Link your Roblox account to the bot.")
@@ -526,7 +731,217 @@ async def verify(interaction: discord.Interaction, roblox_username: str):
             else:
                 await interaction.response.send_message("There was an error looking up the Roblox user.", ephemeral=True)
 
-# /announce (modal)
+# --- NEW: /apply system ---
+class ApplicationModal(discord.ui.Modal):
+    """Modal for long-answer questions."""
+    def __init__(self, question_code: str, question_text: str, min_len: int, max_len: int):
+        super().__init__(title="Application Question")
+        self.q_code = question_code
+        self.min_len = min_len
+        self.max_len = max_len
+        self.answer = None
+        self.q_field = discord.ui.TextInput(
+            label=question_text[:80],
+            style=discord.TextStyle.paragraph,
+            min_length=min_len if min_len < max_len else None,
+            max_length=max_len,
+            required=True
+        )
+        self.add_item(self.q_field)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        self.answer = self.q_field.value.strip()
+        await interaction.response.send_message("✅ Answer saved!", ephemeral=True)
+
+class ApplyView(discord.ui.View):
+    """Dynamic per-user application wizard view."""
+    def __init__(self, user_id: int):
+        super().__init__(timeout=None)
+        self.user_id = user_id
+        self.current_index = 0
+        self.answers: dict[str, str] = {}
+
+    @discord.ui.button(label="Next", style=discord.ButtonStyle.blurple)
+    async def next(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("This isn’t your application.", ephemeral=True)
+            return
+        await self.ask_next(interaction)
+
+    async def ask_next(self, interaction: discord.Interaction):
+        if self.current_index >= len(APPLICATION_QUESTIONS):
+            await self.finish(interaction)
+            return
+        q = APPLICATION_QUESTIONS[self.current_index]
+        if q["type"] == "long":
+            modal = ApplicationModal(q["code"], q["prompt"], q.get("min_len", 0), q.get("max_len", 1000))
+            await interaction.response.send_modal(modal)
+            await modal.wait()
+            if modal.answer:
+                self.answers[q["code"]] = modal.answer
+        else:
+            await interaction.response.send_message(q["prompt"], ephemeral=True)
+            try:
+                msg = await bot.wait_for(
+                    "message",
+                    check=lambda m: m.author.id == interaction.user.id,
+                    timeout=APPLICATION_TIMEOUT_MINUTES * 60
+                )
+                ans = msg.content.strip()
+                self.answers[q["code"]] = ans
+                await msg.delete()
+            except asyncio.TimeoutError:
+                await interaction.followup.send("⏰ Application timed out. Please restart with `/apply`.", ephemeral=True)
+                return
+        self.current_index += 1
+        if self.current_index < len(APPLICATION_QUESTIONS):
+            await self.ask_next(interaction)
+        else:
+            await self.finish(interaction)
+
+    async def finish(self, interaction: discord.Interaction):
+        # Insert into DB
+        async with bot.db_pool.acquire() as conn:
+            applicant_id = await conn.fetchval(
+                "INSERT INTO applicants (discord_id, status, updated_at) VALUES ($1, 'submitted', now()) "
+                "ON CONFLICT (discord_id) DO UPDATE SET status='submitted', updated_at=now() RETURNING id",
+                self.user_id
+            )
+            run_id = await conn.fetchval(
+                "INSERT INTO application_runs (applicant_id, started_at, submitted_at) VALUES ($1, now(), now()) RETURNING id",
+                applicant_id
+            )
+            for code, text in self.answers.items():
+                await conn.execute(
+                    "INSERT INTO answers (run_id, question_code, answer_text, created_at) VALUES ($1, $2, $3, now())",
+                    run_id, code, text
+                )
+
+        await interaction.followup.send("✅ Application submitted! Evaluating your responses...", ephemeral=True)
+
+        # AI Review
+        try:
+            result = await bot.ai.score_application(self.answers)
+        except Exception as e:
+            await interaction.followup.send(f"AI review failed: {e}", ephemeral=True)
+            await log_action("Application AI Error", f"User: <@{self.user_id}>\nError: {e}")
+            return
+
+        score = float(result.get("overall_score", 0))
+        verdict = result.get("verdict", "reject")
+        rationale = result.get("rationale", "")
+        await log_action(
+            "Application Scored",
+            f"User: <@{self.user_id}>\nScore: **{score}**\nVerdict: `{verdict}`\nRationale: {rationale[:150]}..."
+        )
+
+        # Save AI review + decision
+        async with bot.db_pool.acquire() as conn:
+            await conn.execute(
+                "INSERT INTO ai_reviews (run_id, model, score, verdict, rationale) VALUES ($1,$2,$3,$4,$5)",
+                run_id, AI_MODEL, score, verdict, rationale
+            )
+
+        # Auto decision
+        if score >= APPLICATION_AUTO_ACCEPT_THRESHOLD and verdict == "accept":
+            await handle_accept(interaction, self.user_id, self.answers)
+        elif score >= APPLICATION_BORDERLINE_MIN:
+            await handle_borderline(interaction, self.user_id, self.answers, score)
+        else:
+            await handle_reject(interaction, self.user_id, score, rationale)
+
+async def handle_accept(interaction: discord.Interaction, discord_id: int, answers: dict):
+    """Accept, verify Roblox, rank, welcome."""
+    member = find_member(discord_id)
+    roblox_name = answers.get("roblox_username", "").strip()
+    if not member:
+        return
+
+    # Auto verify Roblox
+    if roblox_name:
+        payload = {"usernames": [roblox_name], "excludeBannedUsers": True}
+        async with aiohttp.ClientSession() as session:
+            async with session.post("https://users.roblox.com/v1/usernames/users", json=payload) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    if data["data"]:
+                        roblox_id = data["data"][0]["id"]
+                        async with bot.db_pool.acquire() as conn:
+                            await conn.execute(
+                                "INSERT INTO roblox_verification (discord_id, roblox_id) VALUES ($1,$2) "
+                                "ON CONFLICT (discord_id) DO UPDATE SET roblox_id=EXCLUDED.roblox_id",
+                                discord_id, roblox_id
+                            )
+                        await log_action("Auto Verified", f"User: <@{discord_id}> | Roblox: `{roblox_name}` ({roblox_id})")
+
+    # Auto rank to Medical Student
+    async with bot.db_pool.acquire() as conn:
+        roblox_id = await conn.fetchval("SELECT roblox_id FROM roblox_verification WHERE discord_id=$1", discord_id)
+    if roblox_id:
+        await set_group_rank(int(roblox_id), rank_number=1)  # 1 = Medical Student by your group
+    if MEDICAL_STUDENT_ROLE_ID:
+        role = interaction.guild.get_role(MEDICAL_STUDENT_ROLE_ID)
+        if role:
+            await member.add_roles(role, reason="Auto-accepted application")
+
+    # Send welcome message
+    comms = bot.get_channel(COMMS_CHANNEL_ID)
+    if comms:
+        await comms.send(f"🎉 Please welcome {member.mention} to the **Medical Department**!")
+    await log_action("Application Accepted", f"Auto-accepted: <@{discord_id}>")
+
+    await interaction.followup.send(f"✅ Application accepted for {member.mention}!", ephemeral=True)
+
+async def handle_borderline(interaction, discord_id, answers, score):
+    """Queue for manual review"""
+    member = find_member(discord_id)
+    comms = bot.get_channel(COMMS_CHANNEL_ID)
+    await log_action("Application Borderline", f"<@{discord_id}> — Score: {score}")
+    if comms:
+        await comms.send(
+            f"🟡 Application borderline — needs manual review.\nUser: {member.mention if member else discord_id}\nScore: **{score}**"
+        )
+    await interaction.followup.send("⚠️ Application under manual review.", ephemeral=True)
+
+async def handle_reject(interaction, discord_id, score, rationale):
+    """Reject application."""
+    member = find_member(discord_id)
+    if member:
+        try:
+            await member.send(
+                f"Hello — thank you for applying to the **Medical Department**, but unfortunately your application has not been accepted.\n\n"
+                f"**Score:** {score}\nReasoning:\n> {rationale[:300]}"
+            )
+        except:
+            pass
+    await log_action("Application Rejected", f"User: <@{discord_id}> | Score: {score}")
+    await interaction.followup.send("❌ Application rejected.", ephemeral=True)
+
+# /apply command
+@bot.tree.command(name="apply", description="Begin your Medical Department application.")
+async def apply(interaction: discord.Interaction):
+    async with bot.db_pool.acquire() as conn:
+        cooldown = await conn.fetchval("SELECT cooldown_until FROM applicants WHERE discord_id=$1", interaction.user.id)
+        if cooldown and cooldown > utcnow():
+            remain = human_remaining(cooldown - utcnow())
+            await interaction.response.send_message(
+                f"You must wait {remain} before applying again.", ephemeral=True
+            )
+            return
+
+    view = ApplyView(interaction.user.id)
+    await interaction.response.send_message(
+        "Let's begin your Medical Department application. Click **Next** to start!",
+        view=view,
+        ephemeral=True
+    )
+
+# === PART 2/3 END ===
+# Reply "next" to receive PART 3/3 — final section with /welcome, /dm, orientation, strikes, excuses, weekly loop, and bot.run().
+# main.py (Medical Department bot) — PART 3/3
+# Continues from Part 2 — original commands restored + loops + /rank + bot.run()
+
+# ---------- Announcements ----------
 class AnnouncementForm(discord.ui.Modal, title='Send Announcement'):
     def __init__(self, color_obj: discord.Color):
         super().__init__()
@@ -565,7 +980,7 @@ async def announce(interaction: discord.Interaction, color: str = "blue"):
     color_obj = getattr(discord.Color, color, discord.Color.blue)()
     await interaction.response.send_modal(AnnouncementForm(color_obj=color_obj))
 
-# /tasks log (modal)
+# ---------- Tasks ----------
 class LogTaskForm(discord.ui.Modal, title='Add Comments (optional)'):
     def __init__(self, proof: discord.Attachment, task_type: str):
         super().__init__()
@@ -624,7 +1039,6 @@ class LogTaskForm(discord.ui.Modal, title='Add Comments (optional)'):
 async def tasks_log(interaction: discord.Interaction, task_type: str, proof: discord.Attachment):
     await interaction.response.send_modal(LogTaskForm(proof=proof, task_type=task_type))
 
-# /tasks my
 @tasks_group.command(name="my", description="Check your weekly tasks and time.")
 async def tasks_my(interaction: discord.Interaction):
     member_id = interaction.user.id
@@ -639,7 +1053,6 @@ async def tasks_my(interaction: discord.Interaction):
         ephemeral=True
     )
 
-# /tasks member
 @tasks_group.command(name="member", description="Show a member's task totals by type (all-time).")
 async def tasks_member(interaction: discord.Interaction, member: discord.Member | None = None):
     target = member or interaction.user
@@ -668,7 +1081,6 @@ async def tasks_member(interaction: discord.Interaction, member: discord.Member 
     await log_action("Viewed Tasks", f"Requester: {interaction.user.mention}\nTarget: {target.mention if target != interaction.user else 'self'}")
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
-# /tasks add (mgmt)
 @tasks_group.command(name="add", description="(Mgmt) Add tasks to a member's history and weekly totals.")
 @app_commands.checks.has_role(MANAGEMENT_ROLE_ID)
 @app_commands.choices(task_type=[app_commands.Choice(name=t, value=t) for t in TASK_TYPES])
@@ -723,7 +1135,6 @@ async def tasks_add(
     await log_action("Tasks Added", f"By: {interaction.user.mention}\nMember: {member.mention}\nType: **{task_type}** × {count}")
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
-# /tasks leaderboard
 @tasks_group.command(name="leaderboard", description="Displays the weekly leaderboard (tasks + on-site minutes).")
 async def tasks_leaderboard(interaction: discord.Interaction):
     async with bot.db_pool.acquire() as conn:
@@ -758,7 +1169,6 @@ async def tasks_leaderboard(interaction: discord.Interaction):
     await log_action("Viewed Leaderboard", f"Requester: {interaction.user.mention}")
     await interaction.response.send_message(embed=embed)
 
-# /tasks undo (mgmt)
 @tasks_group.command(name="undo", description="Removes the last logged task for a member.")
 @app_commands.checks.has_role(MANAGEMENT_ROLE_ID)
 async def tasks_undo(interaction: discord.Interaction, member: discord.Member):
@@ -783,7 +1193,8 @@ async def tasks_undo(interaction: discord.Interaction, member: discord.Member):
         f"Removed last weekly task for {member.mention}: '{last_log['task']}'. They now have {new_count} tasks.",
         ephemeral=True
     )
-# /welcome
+
+# ---------- Welcome + DM ----------
 @bot.tree.command(name="welcome", description="Sends the official welcome message.")
 @app_commands.checks.has_role(MANAGEMENT_ROLE_ID)
 async def welcome(interaction: discord.Interaction):
@@ -817,7 +1228,6 @@ async def welcome(interaction: discord.Interaction):
     await log_action("Welcome Sent", f"By: {interaction.user.mention} • Channel: {interaction.channel.mention}")
     await interaction.response.send_message("Welcome message sent!", ephemeral=True)
 
-# /dm (mgmt)
 @bot.tree.command(name="dm", description="Sends a direct message to a member.")
 @app_commands.checks.has_role(MANAGEMENT_ROLE_ID)
 async def dm(interaction: discord.Interaction, member: discord.Member, title: str, message: str):
@@ -841,7 +1251,7 @@ async def dm(interaction: discord.Interaction, member: discord.Member, title: st
         await interaction.response.send_message("An unexpected error occurred.", ephemeral=True)
         print(f"DM command error: {e}")
 
-# /verification audit (mgmt)
+# ---------- Verification audit ----------
 @bot.tree.command(
     name="verification_audit",
     description="(Mgmt) List members missing /verify and optionally ping them in comms.",
@@ -903,9 +1313,7 @@ async def verification_audit(interaction: discord.Interaction, ping: bool = Fals
                 ping_result = "The comms channel isn't configured."
             else:
                 allowed_mentions = discord.AllowedMentions(users=True)
-                reminder = (
-                    "Please run `/verify` with your Roblox username so your activity can be logged accurately."
-                )
+                reminder = "Please run `/verify` with your Roblox username so your activity can be logged accurately."
 
                 def mention_chunks(max_len: int = 1800):
                     chunk: list[str] = []
@@ -967,10 +1375,8 @@ async def verification_audit(interaction: discord.Interaction, ping: bool = Fals
 
     await log_action("Verification Audit", "\n".join(log_lines))
 
-# --- Orientation helpers/commands ---
-
+# ---------- Orientation ----------
 async def ensure_orientation_record(member: discord.Member):
-    """Ensure orientation window exists for members with MEDICAL_STUDENT_ROLE_ID."""
     async with bot.db_pool.acquire() as conn:
         row = await conn.fetchrow("SELECT discord_id FROM orientations WHERE discord_id = $1", member.id)
         if row:
@@ -984,7 +1390,6 @@ async def ensure_orientation_record(member: discord.Member):
                 member.id, assigned, deadline
             )
 
-# /orientation complete
 @orientation_group.command(name="complete", description="(Mgmt) Mark a member as having passed orientation.")
 @app_commands.checks.has_role(MANAGEMENT_ROLE_ID)
 async def orientation_complete(interaction: discord.Interaction, member: discord.Member):
@@ -1008,7 +1413,6 @@ async def orientation_complete(interaction: discord.Interaction, member: discord
     await log_action("Orientation Passed", f"Member: {member.mention}\nBy: {interaction.user.mention}")
     await interaction.response.send_message(f"Marked {member.mention} as **passed orientation**.", ephemeral=True)
 
-# /orientation view
 @orientation_group.command(name="view", description="View a member's orientation status.")
 async def orientation_view(interaction: discord.Interaction, member: discord.Member | None = None):
     target = member or interaction.user
@@ -1035,7 +1439,6 @@ async def orientation_view(interaction: discord.Interaction, member: discord.Mem
     await log_action("Orientation Viewed", f"Requester: {interaction.user.mention}\nTarget: {target.mention if target != interaction.user else 'self'}")
     await interaction.response.send_message(msg, ephemeral=True)
 
-# /orientation extend
 @orientation_group.command(name="extend", description="(Mgmt) Extend a member's orientation deadline by N days.")
 @app_commands.checks.has_role(MANAGEMENT_ROLE_ID)
 async def orientation_extend(interaction: discord.Interaction, member: discord.Member, days: app_commands.Range[int, 1, 60], reason: str | None = None):
@@ -1058,10 +1461,8 @@ async def orientation_extend(interaction: discord.Interaction, member: discord.M
         ephemeral=True
     )
 
-# --- Strike helpers/commands ---
-
+# ---------- Strikes ----------
 async def issue_strike(member: discord.Member, reason: str, *, set_by: int | None, auto: bool) -> int:
-    """Create a strike, DM the user, return active strike count after this new strike."""
     now = utcnow()
     expires = now + datetime.timedelta(days=90)
     async with bot.db_pool.acquire() as conn:
@@ -1072,7 +1473,6 @@ async def issue_strike(member: discord.Member, reason: str, *, set_by: int | Non
         )
         active = await conn.fetchval("SELECT COUNT(*) FROM strikes WHERE member_id=$1 AND expires_at > $2", member.id, now)
 
-    # DM
     try:
         await member.send(
             f"You've received a strike for failing to complete your weekly quota. "
@@ -1086,7 +1486,6 @@ async def issue_strike(member: discord.Member, reason: str, *, set_by: int | Non
     return active
 
 async def enforce_three_strikes(member: discord.Member):
-    """Kick from Roblox (if connected) and Discord, DM, and log."""
     try:
         await member.send("You've been automatically removed from the Medical Department for reaching **3/3 strikes**.")
     except:
@@ -1104,7 +1503,6 @@ async def enforce_three_strikes(member: discord.Member):
     await log_action("Three-Strike Removal",
                      f"Member: {member.mention}\nRoblox removal: {'✅' if roblox_removed else '❌/N/A'}\nDiscord kick: {'✅' if kicked else '❌'}")
 
-# /strikes add
 @strikes_group.command(name="add", description="(Mgmt) Add a strike to a member.")
 @app_commands.checks.has_role(MANAGEMENT_ROLE_ID)
 async def strikes_add(interaction: discord.Interaction, member: discord.Member, reason: str):
@@ -1113,7 +1511,6 @@ async def strikes_add(interaction: discord.Interaction, member: discord.Member, 
         await enforce_three_strikes(member)
     await interaction.response.send_message(f"Strike added to {member.mention}. Active strikes: **{active_after}/3**.", ephemeral=True)
 
-# /strikes remove
 @strikes_group.command(name="remove", description="(Mgmt) Remove N active strikes from a member (earliest expiring first).")
 @app_commands.checks.has_role(MANAGEMENT_ROLE_ID)
 async def strikes_remove(interaction: discord.Interaction, member: discord.Member, count: app_commands.Range[int, 1, 10] = 1):
@@ -1132,7 +1529,6 @@ async def strikes_remove(interaction: discord.Interaction, member: discord.Membe
     await log_action("Strikes Removed", f"Member: {member.mention}\nRemoved: **{len(ids)}**\nActive remaining: **{remaining}/3**")
     await interaction.response.send_message(f"Removed **{len(ids)}** strike(s) from {member.mention}. Active remaining: **{remaining}/3**.", ephemeral=True)
 
-# /strikes view
 @strikes_group.command(name="view", description="View a member's active and total strikes.")
 async def strikes_view(interaction: discord.Interaction, member: discord.Member | None = None):
     target = member or interaction.user
@@ -1147,7 +1543,8 @@ async def strikes_view(interaction: discord.Interaction, member: discord.Member 
         desc = f"**Active strikes:** {len(active_rows)}/3\n" + "\n".join(lines) + f"\n\n**Total strikes ever:** {total}"
     embed = discord.Embed(title=f"Strikes for {target.display_name}", description=desc, color=discord.Color.orange(), timestamp=utcnow())
     await interaction.response.send_message(embed=embed, ephemeral=True)
-# === Activity Excuse commands ===
+
+# ---------- Excuses ----------
 @excuses_group.command(name="week", description="(Mgmt) Set or clear a weekly activity excuse (no strikes for that week).")
 @app_commands.checks.has_role(MANAGEMENT_ROLE_ID)
 @app_commands.describe(action="set or clear", week="ISO week like 2025-W39; default = current week", reason="Required when action=set")
@@ -1233,7 +1630,7 @@ async def excuses_member(
             ephemeral=True,
         )
 
-# === Weekly task summary + strikes + reset ===
+# ---------- Weekly task summary + strikes + reset ----------
 @tasks.loop(time=datetime.time(hour=4, minute=0, tzinfo=datetime.timezone.utc))
 async def check_weekly_tasks():
     # Only fire on Sunday UTC
@@ -1241,7 +1638,7 @@ async def check_weekly_tasks():
         return
 
     wk = week_key()
-    # If excused week, we still post the report but we **do not issue strikes**
+    # If excused week, post the report but **do not issue strikes**
     async with bot.db_pool.acquire() as conn:
         is_excused_row = await conn.fetchrow("SELECT week_key, reason FROM activity_excuses WHERE week_key=$1", wk)
     excused_reason = is_excused_row["reason"] if is_excused_row else None
@@ -1370,7 +1767,7 @@ async def check_weekly_tasks():
         await conn.execute("TRUNCATE TABLE weekly_tasks, weekly_task_logs, roblox_time, roblox_sessions")
     print("Weekly tasks and time checked and reset.")
 
-# Orientation 5-day warning + overdue enforcement
+# ---------- Orientation reminder loop ----------
 @tasks.loop(minutes=30)
 async def orientation_reminder_loop():
     try:
@@ -1442,7 +1839,7 @@ async def orientation_reminder_loop():
 async def before_orientation_loop():
     await bot.wait_until_ready()
 
-# === /rank with autocomplete ===
+# ---------- /rank with autocomplete ----------
 async def group_role_autocomplete(interaction: discord.Interaction, current: str):
     current_lower = (current or "").lower()
     roles = await fetch_group_ranks()
@@ -1524,13 +1921,13 @@ async def rank(interaction: discord.Interaction, member: discord.Member, group_r
     await log_action("Rank Set", f"By: {interaction.user.mention}\nMember: {member.mention}\nNew Rank: **{target['name']}**")
     await interaction.response.send_message(msg, ephemeral=True)
 
-# === Register command groups ===
+# ---------- Register groups ----------
 bot.tree.add_command(tasks_group)
 bot.tree.add_command(orientation_group)
 bot.tree.add_command(strikes_group)
 bot.tree.add_command(excuses_group)
 
-# === Run ===
+# ---------- Run ----------
 if __name__ == "__main__":
     if ROBLOX_SERVICE_BASE:
         try:
