@@ -70,6 +70,12 @@ if ROBLOX_REMOVE_URL and not ROBLOX_REMOVE_URL.startswith("http"):
     ROBLOX_REMOVE_URL = "https://" + ROBLOX_REMOVE_URL
 ROBLOX_REMOVE_SECRET = os.getenv("ROBLOX_REMOVE_SECRET") or None
 ROBLOX_GROUP_ID      = os.getenv("ROBLOX_GROUP_ID") or None  # optional, forwarded if present
+ROBLOX_MEDICAL_DIVISION_URL = "https://www.roblox.com/communities/695368604/SCPF-Medical-Division#!/about"
+
+APPLICATION_PENDING_WARNING = (
+    "⚠️ **Reminder:** Ensure you have a pending join request for the "
+    f"[SCPF Medical Division Roblox group]({ROBLOX_MEDICAL_DIVISION_URL})."
+)
 
 # Roblox rank configuration for automatic onboarding
 AUTO_ACCEPT_GROUP_ROLE_NAME   = os.getenv("AUTO_ACCEPT_GROUP_ROLE_NAME") or "Medical Student"
@@ -917,7 +923,10 @@ class ApplyView(discord.ui.View):
         elif self.stage == "completed":
             body = "Your application has been submitted. You may close this window."
         elif self.current_index == 0:
-            body = "Press **Start Application** to answer the first question."
+            body = (
+                "Press **Start Application** to answer the first question.\n\n"
+                f"{APPLICATION_PENDING_WARNING}"
+            )
         else:
             body = "Click **Next Question** to continue."
         return f"{header}\n{progress}\n\n{body}"
@@ -1098,7 +1107,11 @@ class ApplyView(discord.ui.View):
                         run_id, code, text
                     )
 
-            await interaction.followup.send("✅ Application submitted! Evaluating your responses...", ephemeral=True)
+            await interaction.followup.send(
+                "✅ Application submitted! Evaluating your responses...\n\n"
+                f"{APPLICATION_PENDING_WARNING}",
+                ephemeral=True,
+            )
 
             try:
                 result = await bot.ai.score_application(self.answers)
