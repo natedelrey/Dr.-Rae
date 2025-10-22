@@ -340,11 +340,16 @@ async def set_group_rank(roblox_id: int, role_id: int = None, rank_number: int =
     try:
         async def do_post():
             async with aiohttp.ClientSession() as session:
-                async with session.post(url, json=body, headers={"X-Secret-Key": ROBLOX_REMOVE_SECRET, "Content-Type": "application/json"}, timeout=20) as resp:
-                    if not (200 <= resp.status < 300):
-                        text = await resp.text()
-                        raise RuntimeError(f"/set-rank HTTP {resp.status}: {text}")
-                    return True
+                async with session.post(
+                    url,
+                    json=body,
+                    headers={"X-Secret-Key": ROBLOX_REMOVE_SECRET, "Content-Type": "application/json"},
+                    timeout=20,
+                ) as resp:
+                    text = await resp.text()
+                    if _is_idempotent_ok(resp.status, text):
+                        return True
+                    raise RuntimeError(f"/set-rank HTTP {resp.status}: {text}")
         return await _retry(do_post)
     except Exception as e:
         print(f"set_group_rank error: {e}")
@@ -365,6 +370,19 @@ async def find_group_role_by_name(name: str) -> dict | None:
     return None
 
 # >>> NEW: accept join + ensure member+rank helpers <<<
+def _is_idempotent_ok(status: int, body_text: str) -> bool:
+    if 200 <= status < 300:
+        return True
+    if status != 400:
+        return False
+    text_lower = body_text.lower()
+    idempotent_markers = [
+        "you cannot change the user's role to the same role",
+        "group join request is invalid",
+        "user is already a member",
+    ]
+    return any(marker in text_lower for marker in idempotent_markers)
+
 async def accept_group_join(roblox_id: int) -> bool:
     """Call service /accept-join to approve a pending request for this user."""
     if not ROBLOX_SERVICE_BASE or not ROBLOX_REMOVE_SECRET:
@@ -378,7 +396,11 @@ async def accept_group_join(roblox_id: int) -> bool:
                 headers={"X-Secret-Key": ROBLOX_REMOVE_SECRET, "Content-Type": "application/json"},
                 timeout=20
             ) as resp:
-                return 200 <= resp.status < 300
+                text = await resp.text()
+                if _is_idempotent_ok(resp.status, text):
+                    return True
+                print(f"accept_group_join failed {resp.status}: {text}")
+                return False
     except Exception as e:
         print(f"accept_group_join error: {e}")
         return False
@@ -399,7 +421,11 @@ async def ensure_member_and_rank(roblox_id: int, *, rank_number: int = None, rol
                 headers={"X-Secret-Key": ROBLOX_REMOVE_SECRET, "Content-Type": "application/json"},
                 timeout=30
             ) as resp:
-                return 200 <= resp.status < 300
+                text = await resp.text()
+                if _is_idempotent_ok(resp.status, text):
+                    return True
+                print(f"ensure_member_and_rank failed {resp.status}: {text}")
+                return False
     except Exception as e:
         print(f"ensure_member_and_rank error: {e}")
         return False
