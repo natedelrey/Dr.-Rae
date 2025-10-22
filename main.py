@@ -459,6 +459,11 @@ class MD_BOT(commands.Bot):
 
 bot = MD_BOT()
 
+tasks_group = app_commands.Group(name="tasks", description="Commands for tracking Medical Department tasks.")
+orientation_group = app_commands.Group(name="orientation", description="Manage member orientation progress.")
+strikes_group = app_commands.Group(name="strikes", description="Manage member strikes.")
+excuses_group = app_commands.Group(name="excuses", description="Manage activity excuses.")
+
 # === Events ===
 @bot.event
 async def on_ready():
@@ -561,7 +566,7 @@ async def announce(interaction: discord.Interaction, color: str = "blue"):
     color_obj = getattr(discord.Color, color, discord.Color.blue)()
     await interaction.response.send_modal(AnnouncementForm(color_obj=color_obj))
 
-# /log (modal)
+# /tasks log (modal)
 class LogTaskForm(discord.ui.Modal, title='Add Comments (optional)'):
     def __init__(self, proof: discord.Attachment, task_type: str):
         super().__init__()
@@ -615,14 +620,14 @@ class LogTaskForm(discord.ui.Modal, title='Add Comments (optional)'):
             ephemeral=True
         )
 
-@bot.tree.command(name="log", description="Log a completed task with proof and type.")
+@tasks_group.command(name="log", description="Log a completed task with proof and type.")
 @app_commands.choices(task_type=[app_commands.Choice(name=t, value=t) for t in TASK_TYPES])
-async def log(interaction: discord.Interaction, task_type: str, proof: discord.Attachment):
+async def tasks_log(interaction: discord.Interaction, task_type: str, proof: discord.Attachment):
     await interaction.response.send_modal(LogTaskForm(proof=proof, task_type=task_type))
 
-# /mytasks
-@bot.tree.command(name="mytasks", description="Check your weekly tasks and time.")
-async def mytasks(interaction: discord.Interaction):
+# /tasks my
+@tasks_group.command(name="my", description="Check your weekly tasks and time.")
+async def tasks_my(interaction: discord.Interaction):
     member_id = interaction.user.id
     async with bot.db_pool.acquire() as conn:
         tasks_completed    = await conn.fetchval("SELECT tasks_completed FROM weekly_tasks WHERE member_id = $1", member_id) or 0
@@ -635,9 +640,9 @@ async def mytasks(interaction: discord.Interaction):
         ephemeral=True
     )
 
-# /viewtasks
-@bot.tree.command(name="viewtasks", description="Show a member's task totals by type (all-time).")
-async def viewtasks(interaction: discord.Interaction, member: discord.Member | None = None):
+# /tasks member
+@tasks_group.command(name="member", description="Show a member's task totals by type (all-time).")
+async def tasks_member(interaction: discord.Interaction, member: discord.Member | None = None):
     target = member or interaction.user
     async with bot.db_pool.acquire() as conn:
         rows = await conn.fetch(
@@ -664,11 +669,11 @@ async def viewtasks(interaction: discord.Interaction, member: discord.Member | N
     await log_action("Viewed Tasks", f"Requester: {interaction.user.mention}\nTarget: {target.mention if target != interaction.user else 'self'}")
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
-# /addtask (mgmt)
-@bot.tree.command(name="addtask", description="(Mgmt) Add tasks to a member's history and weekly totals.")
+# /tasks add (mgmt)
+@tasks_group.command(name="add", description="(Mgmt) Add tasks to a member's history and weekly totals.")
 @app_commands.checks.has_role(MANAGEMENT_ROLE_ID)
 @app_commands.choices(task_type=[app_commands.Choice(name=t, value=t) for t in TASK_TYPES])
-async def addtask(
+async def tasks_add(
     interaction: discord.Interaction,
     member: discord.Member,
     task_type: str,
@@ -719,9 +724,9 @@ async def addtask(
     await log_action("Tasks Added", f"By: {interaction.user.mention}\nMember: {member.mention}\nType: **{task_type}** × {count}")
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
-# /leaderboard
-@bot.tree.command(name="leaderboard", description="Displays the weekly leaderboard (tasks + on-site minutes).")
-async def leaderboard(interaction: discord.Interaction):
+# /tasks leaderboard
+@tasks_group.command(name="leaderboard", description="Displays the weekly leaderboard (tasks + on-site minutes).")
+async def tasks_leaderboard(interaction: discord.Interaction):
     async with bot.db_pool.acquire() as conn:
         task_rows = await conn.fetch("SELECT member_id, tasks_completed FROM weekly_tasks")
         time_rows = await conn.fetch("SELECT member_id, time_spent FROM roblox_time")
@@ -754,10 +759,10 @@ async def leaderboard(interaction: discord.Interaction):
     await log_action("Viewed Leaderboard", f"Requester: {interaction.user.mention}")
     await interaction.response.send_message(embed=embed)
 
-# /removelastlog (mgmt)
-@bot.tree.command(name="removelastlog", description="Removes the last logged task for a member.")
+# /tasks undo (mgmt)
+@tasks_group.command(name="undo", description="Removes the last logged task for a member.")
 @app_commands.checks.has_role(MANAGEMENT_ROLE_ID)
-async def removelastlog(interaction: discord.Interaction, member: discord.Member):
+async def tasks_undo(interaction: discord.Interaction, member: discord.Member):
     member_id = member.id
     async with bot.db_pool.acquire() as conn:
         async with conn.transaction():
@@ -884,9 +889,10 @@ async def ensure_orientation_record(member: discord.Member):
                 member.id, assigned, deadline
             )
 
-@bot.tree.command(name="passedorientation", description="(Mgmt) Mark a member as having passed orientation.")
+# /orientation complete
+@orientation_group.command(name="complete", description="(Mgmt) Mark a member as having passed orientation.")
 @app_commands.checks.has_role(MANAGEMENT_ROLE_ID)
-async def passedorientation(interaction: discord.Interaction, member: discord.Member):
+async def orientation_complete(interaction: discord.Interaction, member: discord.Member):
     assigned = utcnow()
     deadline = assigned + datetime.timedelta(days=14)
     passed_at = assigned
@@ -907,8 +913,9 @@ async def passedorientation(interaction: discord.Interaction, member: discord.Me
     await log_action("Orientation Passed", f"Member: {member.mention}\nBy: {interaction.user.mention}")
     await interaction.response.send_message(f"Marked {member.mention} as **passed orientation**.", ephemeral=True)
 
-@bot.tree.command(name="orientationview", description="View a member's orientation status.")
-async def orientationview(interaction: discord.Interaction, member: discord.Member | None = None):
+# /orientation view
+@orientation_group.command(name="view", description="View a member's orientation status.")
+async def orientation_view(interaction: discord.Interaction, member: discord.Member | None = None):
     target = member or interaction.user
     await ensure_orientation_record(target)
     async with bot.db_pool.acquire() as conn:
@@ -933,9 +940,10 @@ async def orientationview(interaction: discord.Interaction, member: discord.Memb
     await log_action("Orientation Viewed", f"Requester: {interaction.user.mention}\nTarget: {target.mention if target != interaction.user else 'self'}")
     await interaction.response.send_message(msg, ephemeral=True)
 
-@bot.tree.command(name="extendorientation", description="(Mgmt) Extend a member's orientation deadline by N days.")
+# /orientation extend
+@orientation_group.command(name="extend", description="(Mgmt) Extend a member's orientation deadline by N days.")
 @app_commands.checks.has_role(MANAGEMENT_ROLE_ID)
-async def extendorientation(interaction: discord.Interaction, member: discord.Member, days: app_commands.Range[int, 1, 60], reason: str | None = None):
+async def orientation_extend(interaction: discord.Interaction, member: discord.Member, days: app_commands.Range[int, 1, 60], reason: str | None = None):
     await ensure_orientation_record(member)
     async with bot.db_pool.acquire() as conn:
         row = await conn.fetchrow("SELECT deadline, passed FROM orientations WHERE discord_id = $1", member.id)
@@ -1001,7 +1009,8 @@ async def enforce_three_strikes(member: discord.Member):
     await log_action("Three-Strike Removal",
                      f"Member: {member.mention}\nRoblox removal: {'✅' if roblox_removed else '❌/N/A'}\nDiscord kick: {'✅' if kicked else '❌'}")
 
-@bot.tree.command(name="strikes_add", description="(Mgmt) Add a strike to a member.")
+# /strikes add
+@strikes_group.command(name="add", description="(Mgmt) Add a strike to a member.")
 @app_commands.checks.has_role(MANAGEMENT_ROLE_ID)
 async def strikes_add(interaction: discord.Interaction, member: discord.Member, reason: str):
     active_after = await issue_strike(member, reason, set_by=interaction.user.id, auto=False)
@@ -1009,7 +1018,8 @@ async def strikes_add(interaction: discord.Interaction, member: discord.Member, 
         await enforce_three_strikes(member)
     await interaction.response.send_message(f"Strike added to {member.mention}. Active strikes: **{active_after}/3**.", ephemeral=True)
 
-@bot.tree.command(name="strikes_remove", description="(Mgmt) Remove N active strikes from a member (earliest expiring first).")
+# /strikes remove
+@strikes_group.command(name="remove", description="(Mgmt) Remove N active strikes from a member (earliest expiring first).")
 @app_commands.checks.has_role(MANAGEMENT_ROLE_ID)
 async def strikes_remove(interaction: discord.Interaction, member: discord.Member, count: app_commands.Range[int, 1, 10] = 1):
     now = utcnow()
@@ -1027,7 +1037,8 @@ async def strikes_remove(interaction: discord.Interaction, member: discord.Membe
     await log_action("Strikes Removed", f"Member: {member.mention}\nRemoved: **{len(ids)}**\nActive remaining: **{remaining}/3**")
     await interaction.response.send_message(f"Removed **{len(ids)}** strike(s) from {member.mention}. Active remaining: **{remaining}/3**.", ephemeral=True)
 
-@bot.tree.command(name="strikes_view", description="View a member's active and total strikes.")
+# /strikes view
+@strikes_group.command(name="view", description="View a member's active and total strikes.")
 async def strikes_view(interaction: discord.Interaction, member: discord.Member | None = None):
     target = member or interaction.user
     now = utcnow()
@@ -1042,10 +1053,10 @@ async def strikes_view(interaction: discord.Interaction, member: discord.Member 
     embed = discord.Embed(title=f"Strikes for {target.display_name}", description=desc, color=discord.Color.orange(), timestamp=utcnow())
     await interaction.response.send_message(embed=embed, ephemeral=True)
 # === Activity Excuse commands ===
-@bot.tree.command(name="activityexcuse", description="(Mgmt) Set or clear a weekly activity excuse (no strikes for that week).")
+@excuses_group.command(name="week", description="(Mgmt) Set or clear a weekly activity excuse (no strikes for that week).")
 @app_commands.checks.has_role(MANAGEMENT_ROLE_ID)
 @app_commands.describe(action="set or clear", week="ISO week like 2025-W39; default = current week", reason="Required when action=set")
-async def activityexcuse(
+async def excuses_week(
     interaction: discord.Interaction,
     action: str = "set",
     week: str | None = None,
@@ -1073,14 +1084,14 @@ async def activityexcuse(
             await log_action("Activity Excuse Cleared", f"Week: **{wk}**\nBy: {interaction.user.mention}")
             await interaction.response.send_message(f"Activity excuse **cleared** for week **{wk}**.", ephemeral=True)
 
-@bot.tree.command(name="excuse", description="(Mgmt) Excuse a member from weekly activity requirements.")
+@excuses_group.command(name="member", description="(Mgmt) Excuse a member from weekly activity requirements.")
 @app_commands.checks.has_role(MANAGEMENT_ROLE_ID)
 @app_commands.describe(
     member="Member to excuse",
     days="Number of days to excuse them (0 removes the excuse)",
     reason="Reason for the excuse (required when days > 0)",
 )
-async def excuse(
+async def excuses_member(
     interaction: discord.Interaction,
     member: discord.Member,
     days: app_commands.Range[int, 0, 365],
@@ -1417,6 +1428,12 @@ async def rank(interaction: discord.Interaction, member: discord.Member, group_r
         msg += f" Also assigned Discord role **{assigned_role.name}**."
     await log_action("Rank Set", f"By: {interaction.user.mention}\nMember: {member.mention}\nNew Rank: **{target['name']}**")
     await interaction.response.send_message(msg, ephemeral=True)
+
+# === Register command groups ===
+bot.tree.add_command(tasks_group)
+bot.tree.add_command(orientation_group)
+bot.tree.add_command(strikes_group)
+bot.tree.add_command(excuses_group)
 
 # === Run ===
 if __name__ == "__main__":
