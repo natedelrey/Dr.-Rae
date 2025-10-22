@@ -14,6 +14,7 @@ import asyncio
 from urllib.parse import urlparse
 import json
 from typing import Optional, Any
+from discord.utils import escape_markdown
 
 # === Configuration ===
 load_dotenv()
@@ -96,8 +97,9 @@ TASK_PLURALS = {
 }
 
 # === Application System Config ===
-APPLICATION_AUTO_ACCEPT_THRESHOLD = float(os.getenv("APPLICATION_AUTO_ACCEPT_THRESHOLD", "80"))
-APPLICATION_BORDERLINE_MIN        = float(os.getenv("APPLICATION_BORDERLINE_MIN", "65"))
+APPLICATION_AUTO_ACCEPT_THRESHOLD = float(os.getenv("APPLICATION_AUTO_ACCEPT_THRESHOLD", "55"))
+APPLICATION_BORDERLINE_MIN        = float(os.getenv("APPLICATION_BORDERLINE_MIN", "30"))
+APPLICATION_HARD_REJECT_THRESHOLD = float(os.getenv("APPLICATION_HARD_REJECT_THRESHOLD", "20"))
 APPLICATION_TIMEOUT_MINUTES       = int(os.getenv("APPLICATION_TIMEOUT_MINUTES", "20"))  # idle per step
 APPLICATION_COOLDOWN_HOURS        = int(os.getenv("APPLICATION_COOLDOWN_HOURS", "24"))   # after decision
 
@@ -358,9 +360,17 @@ class SimpleOpenAI:
         Call Chat Completions with a strict JSON schema for:
         overall_score (0-100), verdict, dimension scores, rationale, flags[].
         """
-        system = "You are a fair and strict reviewer for Medical Department applications. Output only valid JSON."
+        system = (
+            "You are a supportive reviewer for Medical Department applications. "
+            "Default to accepting applicants unless their answers clearly show trolling, rule-breaking, or an inability to participate. "
+            "Output only valid JSON."
+        )
         user_content = {
-            "instructions": "Score this applicant using the rubric. Return strict JSON (no prose).",
+            "instructions": (
+                "Score this applicant using the rubric with a generous lens. "
+                "Only recommend rejection when responses are extremely poor, off-topic, or violate guidelines. "
+                "Return strict JSON (no prose)."
+            ),
             "rubric": {
                 "dimensions": {
                     "commitment": "Evidence of availability/consistency",
@@ -772,23 +782,29 @@ async def verify(interaction: discord.Interaction, roblox_username: str):
 class ApplicationModal(discord.ui.Modal):
     """Modal for long-answer questions."""
     def __init__(self, question_code: str, question_text: str, min_len: int, max_len: int):
-        super().__init__(title="Application Question")
+        modal_title = question_text if len(question_text) <= 45 else question_text[:42] + "..."
+        super().__init__(title=modal_title)
         self.q_code = question_code
         self.min_len = min_len
         self.max_len = max_len
         self.answer = None
+        placeholder = question_text if len(question_text) <= 100 else question_text[:97] + "..."
         self.q_field = discord.ui.TextInput(
-            label=(question_text if len(question_text) <= 45 else question_text[:42] + "..."),
+            label="Your Answer",
             style=discord.TextStyle.paragraph,
             min_length=min_len if 0 < min_len < max_len else None,
             max_length=max_len,
-            required=True
+            required=True,
+            placeholder=placeholder
         )
         self.add_item(self.q_field)
 
     async def on_submit(self, interaction: discord.Interaction):
         self.answer = self.q_field.value.strip()
-        await interaction.response.send_message("✅ Answer saved!", ephemeral=True)
+        await interaction.response.send_message(
+            "✅ Answer saved! Click **Next Question** when you're ready to continue.",
+            ephemeral=True
+        )
 
 class ApplyView(discord.ui.View):
     """Dynamic per-user application wizard view."""
@@ -797,16 +813,80 @@ class ApplyView(discord.ui.View):
         self.user_id = user_id
         self.current_index = 0
         self.answers: dict[str, str] = {}
+        self.stage: str = "intro"
+        self.review_message_sent = False
+        self.total_questions = len(APPLICATION_QUESTIONS)
+        # Button adjustments happen post-init once components exist
+        self.next.label = "Start Application"
+        self.next.style = discord.ButtonStyle.green
 
-    @discord.ui.button(label="Next", style=discord.ButtonStyle.blurple)
-    async def next(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.user.id != self.user_id:
-            await interaction.response.send_message("This isn’t your application.", ephemeral=True)
-            return
-        await self.ask_next(interaction)
+    def _progress_bar(self) -> str:
+        if not self.total_questions:
+            return "[██████████] (0/0)"
+        ratio = self.current_index / self.total_questions
+        filled = max(0, min(10, int(round(ratio * 10))))
+        bar = "█" * filled + "░" * (10 - filled)
+        return f"[{bar}] ({self.current_index}/{self.total_questions})"
 
-    async def ask_next(self, interaction: discord.Interaction):
-        # ensure applicant row exists / update heartbeat
+    def _base_message(self) -> str:
+        header = "**Medical Department Application**"
+        progress = f"Progress: {self._progress_bar()}"
+        if self.stage == "review":
+            body = (
+                "Review your answers in the summary below, then press **Submit Application** when you're ready."
+            )
+        elif self.stage == "submitting":
+            body = "Submitting your responses for review… please wait."
+        elif self.stage == "completed":
+            body = "Your application has been submitted. You may close this window."
+        elif self.current_index == 0:
+            body = "Press **Start Application** to answer the first question."
+        else:
+            body = "Click **Next Question** to continue."
+        return f"{header}\n{progress}\n\n{body}"
+
+    def _truncate(self, text: str, limit: int = 200) -> str:
+        clean = text.strip()
+        if not clean:
+            return "*No response provided*"
+        if len(clean) <= limit:
+            return clean
+        return clean[: limit - 3] + "..."
+
+    async def _refresh_message(self, interaction: discord.Interaction):
+        if self.stage == "review":
+            self.next.label = "Submit Application"
+            self.next.style = discord.ButtonStyle.green
+        elif self.stage == "completed":
+            self.next.label = "Submitted"
+            self.next.disabled = True
+            self.next.style = discord.ButtonStyle.gray
+        elif self.current_index == 0:
+            self.next.label = "Start Application"
+            self.next.style = discord.ButtonStyle.green
+        else:
+            self.next.label = "Next Question"
+            self.next.style = discord.ButtonStyle.blurple
+
+        if interaction.response.is_done():
+            await interaction.edit_original_response(content=self._base_message(), view=self)
+        else:
+            await interaction.response.edit_message(content=self._base_message(), view=self)
+
+    def _build_review_embed(self) -> discord.Embed:
+        embed = discord.Embed(
+            title="Application Review",
+            description="Please look over your responses before submitting.",
+            color=discord.Color.blurple(),
+            timestamp=utcnow()
+        )
+        for question in APPLICATION_QUESTIONS:
+            answer = self.answers.get(question["code"], "")
+            snippet = self._truncate(answer)
+            embed.add_field(name=question["prompt"][:256], value=escape_markdown(snippet), inline=False)
+        return embed
+
+    async def _ensure_applicant_row(self):
         async with bot.db_pool.acquire() as conn:
             await conn.execute(
                 "INSERT INTO applicants (discord_id, status) VALUES ($1,'in_progress') "
@@ -814,114 +894,206 @@ class ApplyView(discord.ui.View):
                 self.user_id
             )
 
-        if self.current_index >= len(APPLICATION_QUESTIONS):
-            await self.finish(interaction)
+    async def _after_answer(self, interaction: discord.Interaction, *, remind: bool):
+        self.current_index = min(self.current_index + 1, self.total_questions)
+        self.stage = "questions"
+        await self._refresh_message(interaction)
+        if self.current_index >= self.total_questions:
+            await self.show_review(interaction)
+        elif remind:
+            await interaction.followup.send(
+                "Answer saved! Click **Next Question** when you're ready for the next prompt.",
+                ephemeral=True
+            )
+
+    @discord.ui.button(label="Next", style=discord.ButtonStyle.blurple)
+    async def next(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("This isn’t your application.", ephemeral=True)
             return
 
-        q = APPLICATION_QUESTIONS[self.current_index]
-        prompt = q["prompt"]
-        q_code = q["code"]
+        if self.stage == "completed":
+            await interaction.response.send_message("Your application has already been submitted.", ephemeral=True)
+            return
 
-        if q["type"] == "long":
-            modal = ApplicationModal(q_code, prompt, q.get("min_len", 0), q.get("max_len", 1000))
+        if self.stage == "review":
+            await self.submit_application(interaction)
+            return
+
+        if self.current_index >= self.total_questions:
+            await self.show_review(interaction)
+            return
+
+        await self.present_question(interaction)
+
+    async def present_question(self, interaction: discord.Interaction):
+        await self._ensure_applicant_row()
+
+        question = APPLICATION_QUESTIONS[self.current_index]
+        prompt = question["prompt"]
+        q_code = question["code"]
+
+        if question["type"] == "long":
+            modal = ApplicationModal(q_code, prompt, question.get("min_len", 0), question.get("max_len", 1000))
             await interaction.response.send_modal(modal)
             await modal.wait()
-            if modal.answer:
-                self.answers[q_code] = modal.answer
-            else:
-                # user closed modal; stop quietly
+            if not modal.answer:
                 return
-        else:
-            await interaction.response.send_message(prompt, ephemeral=True)
-            try:
-                msg = await bot.wait_for(
-                    "message",
-                    check=lambda m: m.author.id == interaction.user.id and m.channel == interaction.channel,
-                    timeout=APPLICATION_TIMEOUT_MINUTES * 60
-                )
-                ans = (msg.content or "").strip()
-                if q.get("min_len"):
-                    if len(ans) < q["min_len"]:
-                        await interaction.followup.send(f"Please provide at least **{q['min_len']}** characters.", ephemeral=True)
-                        return
-                if q.get("max_len"):
-                    ans = ans[: q["max_len"]]
-                self.answers[q_code] = ans
-                try:
-                    await msg.delete()
-                except:
-                    pass
-            except asyncio.TimeoutError:
-                await interaction.followup.send("⏰ Application timed out. Please restart with `/apply`.", ephemeral=True)
-                return
-
-        self.current_index += 1
-        if self.current_index < len(APPLICATION_QUESTIONS):
-            # ask next
-            await self.ask_next(interaction)
-        else:
-            await self.finish(interaction)
-
-    async def finish(self, interaction: discord.Interaction):
-        # store username into applicants table if present
-        roblox_username = (self.answers.get("roblox_username") or "").strip()
-
-        # Insert into DB
-        async with bot.db_pool.acquire() as conn:
-            applicant_id = await conn.fetchval(
-                "INSERT INTO applicants (discord_id, roblox_username, status, updated_at) "
-                "VALUES ($1, $2, 'submitted', now()) "
-                "ON CONFLICT (discord_id) DO UPDATE SET roblox_username = EXCLUDED.roblox_username, status='submitted', updated_at=now() "
-                "RETURNING id",
-                self.user_id, roblox_username or None
-            )
-            run_id = await conn.fetchval(
-                "INSERT INTO application_runs (applicant_id, started_at, submitted_at) VALUES ($1, now(), now()) RETURNING id",
-                applicant_id
-            )
-            for code, text in self.answers.items():
-                await conn.execute(
-                    "INSERT INTO answers (run_id, question_code, answer_text, created_at) VALUES ($1, $2, $3, now())",
-                    run_id, code, text
-                )
-
-        await interaction.followup.send("✅ Application submitted! Evaluating your responses...", ephemeral=True)
-
-        # AI Review
-        try:
-            result = await bot.ai.score_application(self.answers)
-        except Exception as e:
-            await interaction.followup.send(f"AI review failed: {e}", ephemeral=True)
-            await log_action("Application AI Error", f"User: <@{self.user_id}>\nError: {e}")
+            self.answers[q_code] = modal.answer
+            await self._after_answer(interaction, remind=False)
             return
 
-        # Normalize result
+        await interaction.response.send_message(prompt, ephemeral=True)
         try:
-            score = float(result.get("overall_score", 0))
-        except:
-            score = 0.0
-        verdict = (result.get("verdict") or "reject").lower()
-        rationale = (result.get("rationale") or "")[:1500]
+            msg = await bot.wait_for(
+                "message",
+                check=lambda m: m.author.id == interaction.user.id and m.channel == interaction.channel,
+                timeout=APPLICATION_TIMEOUT_MINUTES * 60
+            )
+        except asyncio.TimeoutError:
+            await interaction.followup.send("⏰ Application timed out. Please restart with `/apply`.", ephemeral=True)
+            return
 
-        await log_action(
-            "Application Scored",
-            f"User: <@{self.user_id}>\nScore: **{score:.1f}**\nVerdict: `{verdict}`\nRationale: {rationale[:300]}..."
-        )
+        ans = (msg.content or "").strip()
+        if question.get("min_len") and len(ans) < question["min_len"]:
+            await interaction.followup.send(
+                f"Please provide at least **{question['min_len']}** characters.",
+                ephemeral=True
+            )
+            try:
+                await msg.delete()
+            except Exception:
+                pass
+            return
 
-        # Save AI review + decision placeholder
-        async with bot.db_pool.acquire() as conn:
-            await conn.execute(
-                "INSERT INTO ai_reviews (run_id, model, score, verdict, rationale) VALUES ($1,$2,$3,$4,$5)",
-                run_id, AI_MODEL, score, verdict, rationale
+        if question.get("max_len"):
+            ans = ans[: question["max_len"]]
+        self.answers[q_code] = ans
+        try:
+            await msg.delete()
+        except Exception:
+            pass
+
+        await self._after_answer(interaction, remind=True)
+
+    async def show_review(self, interaction: discord.Interaction):
+        self.stage = "review"
+        self.current_index = self.total_questions
+        await self._refresh_message(interaction)
+        if not self.review_message_sent:
+            embed = self._build_review_embed()
+            await interaction.followup.send(
+                "Here is a summary of your responses. If you need to make major changes, you can restart `/apply` before submitting.",
+                embed=embed,
+                ephemeral=True
+            )
+            self.review_message_sent = True
+
+    async def submit_application(self, interaction: discord.Interaction):
+        if len(self.answers) < self.total_questions:
+            await interaction.response.send_message(
+                "Please answer every question before submitting.",
+                ephemeral=True
+            )
+            return
+
+        self.stage = "submitting"
+        self.next.disabled = True
+        self.next.label = "Submitting..."
+        self.next.style = discord.ButtonStyle.gray
+
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        await interaction.edit_original_response(content=self._base_message(), view=self)
+
+        roblox_username = (self.answers.get("roblox_username") or "").strip()
+
+        try:
+            async with bot.db_pool.acquire() as conn:
+                applicant_id = await conn.fetchval(
+                    "INSERT INTO applicants (discord_id, roblox_username, status, updated_at) "
+                    "VALUES ($1, $2, 'submitted', now()) "
+                    "ON CONFLICT (discord_id) DO UPDATE SET roblox_username = EXCLUDED.roblox_username, status='submitted', updated_at=now() "
+                    "RETURNING id",
+                    self.user_id, roblox_username or None
+                )
+                run_id = await conn.fetchval(
+                    "INSERT INTO application_runs (applicant_id, started_at, submitted_at) VALUES ($1, now(), now()) RETURNING id",
+                    applicant_id
+                )
+                for code, text in self.answers.items():
+                    await conn.execute(
+                        "INSERT INTO answers (run_id, question_code, answer_text, created_at) VALUES ($1, $2, $3, now())",
+                        run_id, code, text
+                    )
+
+            await interaction.followup.send("✅ Application submitted! Evaluating your responses...", ephemeral=True)
+
+            try:
+                result = await bot.ai.score_application(self.answers)
+            except Exception as e:
+                self.stage = "review"
+                self.next.disabled = False
+                self.next.label = "Submit Application"
+                self.next.style = discord.ButtonStyle.green
+                await interaction.edit_original_response(content=self._base_message(), view=self)
+                await interaction.followup.send(f"AI review failed: {e}", ephemeral=True)
+                await log_action("Application AI Error", f"User: <@{self.user_id}>\nError: {e}")
+                return
+
+            try:
+                score = float(result.get("overall_score", 0))
+            except Exception:
+                score = 0.0
+            verdict = (result.get("verdict") or "reject").lower()
+            rationale = (result.get("rationale") or "")[:1500]
+            flags_raw = result.get("flags") or []
+            if isinstance(flags_raw, str):
+                flags_raw = [flags_raw]
+            flags = [str(flag).lower() for flag in flags_raw if isinstance(flag, str)]
+
+            await log_action(
+                "Application Scored",
+                f"User: <@{self.user_id}>\nScore: **{score:.1f}**\nVerdict: `{verdict}`\nFlags: {', '.join(flags) or 'none'}\nRationale: {rationale[:300]}..."
             )
 
-        # Auto decision
-        if score >= APPLICATION_AUTO_ACCEPT_THRESHOLD and verdict == "accept":
-            await handle_accept(interaction, self.user_id, self.answers, run_id)
-        elif score >= APPLICATION_BORDERLINE_MIN:
-            await handle_borderline(interaction, self.user_id, self.answers, score, run_id)
-        else:
-            await handle_reject(interaction, self.user_id, score, rationale, run_id)
+            async with bot.db_pool.acquire() as conn:
+                await conn.execute(
+                    "INSERT INTO ai_reviews (run_id, model, score, verdict, rationale) VALUES ($1,$2,$3,$4,$5)",
+                    run_id, AI_MODEL, score, verdict, rationale
+                )
+
+            severe_terms = {"toxicity", "harassment", "hate", "plagiarism_suspected", "troll", "spam"}
+            has_severe_flag = any(flag in severe_terms for flag in flags)
+
+            decision_made = False
+            if not has_severe_flag and (verdict == "accept" or score >= APPLICATION_AUTO_ACCEPT_THRESHOLD):
+                await handle_accept(interaction, self.user_id, self.answers, run_id)
+                decision_made = True
+            elif not has_severe_flag and (score >= APPLICATION_BORDERLINE_MIN or verdict == "borderline"):
+                await handle_borderline(interaction, self.user_id, self.answers, score, run_id)
+                decision_made = True
+            elif not has_severe_flag and score >= APPLICATION_HARD_REJECT_THRESHOLD:
+                await handle_borderline(interaction, self.user_id, self.answers, score, run_id)
+                decision_made = True
+            else:
+                await handle_reject(interaction, self.user_id, score, rationale, run_id)
+                decision_made = True
+
+            if decision_made:
+                self.stage = "completed"
+                self.next.label = "Submitted"
+                self.next.disabled = True
+                self.next.style = discord.ButtonStyle.gray
+                await interaction.edit_original_response(content=self._base_message(), view=self)
+
+        except Exception as exc:
+            self.stage = "review"
+            self.next.disabled = False
+            self.next.label = "Submit Application"
+            self.next.style = discord.ButtonStyle.green
+            await interaction.edit_original_response(content=self._base_message(), view=self)
+            await interaction.followup.send(f"There was an error submitting your application: {exc}", ephemeral=True)
+            await log_action("Application Submission Error", f"User: <@{self.user_id}>\nError: {exc}")
 
 async def handle_accept(interaction: discord.Interaction, discord_id: int, answers: dict, run_id: int):
     """Accept, verify Roblox, accept join request if pending, rank, welcome, and set cooldown."""
@@ -1052,7 +1224,7 @@ async def apply(interaction: discord.Interaction):
 
     view = ApplyView(interaction.user.id)
     await interaction.response.send_message(
-        "Let's begin your Medical Department application. Click **Next** to start!",
+        view._base_message(),
         view=view,
         ephemeral=True
     )
