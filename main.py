@@ -13,7 +13,6 @@ from discord import app_commands
 import asyncio
 from urllib.parse import urlparse
 import json
-import textwrap
 from typing import Optional, Any
 
 # === Configuration ===
@@ -46,7 +45,7 @@ API_SECRET_KEY = os.getenv("API_SECRET_KEY")  # for /roblox webhook auth
 
 # AI (application review)
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")  # use OpenAI-compatible endpoint
-AI_MODEL       = os.getenv("AI_MODEL", "gpt-4o-mini")  # lightweight, change as you like
+AI_MODEL       = os.getenv("AI_MODEL", "gpt-4o-mini")
 AI_BASE_URL    = os.getenv("AI_BASE_URL", "https://api.openai.com/v1")
 
 def _normalize_base(url: str | None) -> str | None:
@@ -308,6 +307,46 @@ async def set_group_rank(roblox_id: int, role_id: int = None, rank_number: int =
         print(f"set_group_rank error: {e}")
         return False
 
+# >>> NEW: accept join + ensure member+rank helpers <<<
+async def accept_group_join(roblox_id: int) -> bool:
+    """Call service /accept-join to approve a pending request for this user."""
+    if not ROBLOX_SERVICE_BASE or not ROBLOX_REMOVE_SECRET:
+        return False
+    url = ROBLOX_SERVICE_BASE.rstrip('/') + '/accept-join'
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                url,
+                json={"robloxId": int(roblox_id)},
+                headers={"X-Secret-Key": ROBLOX_REMOVE_SECRET, "Content-Type": "application/json"},
+                timeout=20
+            ) as resp:
+                return 200 <= resp.status < 300
+    except Exception as e:
+        print(f"accept_group_join error: {e}")
+        return False
+
+async def ensure_member_and_rank(roblox_id: int, *, rank_number: int = None, role_id: int = None) -> bool:
+    """Optional: do acceptance + ranking in one server call."""
+    if not ROBLOX_SERVICE_BASE or not ROBLOX_REMOVE_SECRET:
+        return False
+    url = ROBLOX_SERVICE_BASE.rstrip('/') + '/ensure-member-and-rank'
+    payload = {"robloxId": int(roblox_id)}
+    if rank_number is not None: payload["rankNumber"] = int(rank_number)
+    if role_id is not None: payload["roleId"] = int(role_id)
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                url,
+                json=payload,
+                headers={"X-Secret-Key": ROBLOX_REMOVE_SECRET, "Content-Type": "application/json"},
+                timeout=30
+            ) as resp:
+                return 200 <= resp.status < 300
+    except Exception as e:
+        print(f"ensure_member_and_rank error: {e}")
+        return False
+
 # === Minimal OpenAI client for rubric-based review ===
 class SimpleOpenAI:
     def __init__(self, api_key: str, base_url: str):
@@ -341,7 +380,6 @@ class SimpleOpenAI:
             },
             "answers": answers
         }
-        # Compose payload for Chat Completions
         payload = {
             "model": AI_MODEL,
             "response_format": {"type": "json_object"},
@@ -366,7 +404,6 @@ class SimpleOpenAI:
                 try:
                     return json.loads(content)
                 except Exception:
-                    # Fallback: try to strip code fences or trailing text
                     cleaned = content.strip().strip("`")
                     return json.loads(cleaned)
 
@@ -701,10 +738,9 @@ async def global_app_command_error(interaction: discord.Interaction, error: app_
                 pass
 
 # === PART 1/3 END ===
-# Reply "next" and I'll send PART 2/3 with: /verify, announcements, tasks, orientation, strikes, excuses (your original commands retained),
-# plus the entire new /apply wizard views, AI review, auto-verify, auto-rank, and welcome flow.
+# Reply "next" and I'll send PART 2/3 with: /verify, the /apply wizard, AI review, and auto-accept (including accept-join → rank → welcome).
 # main.py (Medical Department bot) — PART 2/3
-# Continues directly from Part 1 — includes original slash commands + new /apply workflow
+# Continues directly from Part 1 — /verify, /apply wizard, AI review, and auto-accept flow.
 
 # /verify
 @bot.tree.command(name="verify", description="Link your Roblox account to the bot.")
@@ -714,7 +750,7 @@ async def verify(interaction: discord.Interaction, roblox_username: str):
         async with session.post("https://users.roblox.com/v1/usernames/users", json=payload) as resp:
             if resp.status == 200:
                 data = await resp.json()
-                if data["data"]:
+                if data.get("data"):
                     user_data = data["data"][0]
                     roblox_id = user_data["id"]
                     roblox_name = user_data["name"]
@@ -731,7 +767,8 @@ async def verify(interaction: discord.Interaction, roblox_username: str):
             else:
                 await interaction.response.send_message("There was an error looking up the Roblox user.", ephemeral=True)
 
-# --- NEW: /apply system ---
+# --- Application flow ---
+
 class ApplicationModal(discord.ui.Modal):
     """Modal for long-answer questions."""
     def __init__(self, question_code: str, question_text: str, min_len: int, max_len: int):
@@ -741,9 +778,9 @@ class ApplicationModal(discord.ui.Modal):
         self.max_len = max_len
         self.answer = None
         self.q_field = discord.ui.TextInput(
-            label=question_text[:80],
+            label=(question_text if len(question_text) <= 45 else question_text[:42] + "..."),
             style=discord.TextStyle.paragraph,
-            min_length=min_len if min_len < max_len else None,
+            min_length=min_len if 0 < min_len < max_len else None,
             max_length=max_len,
             required=True
         )
@@ -769,43 +806,74 @@ class ApplyView(discord.ui.View):
         await self.ask_next(interaction)
 
     async def ask_next(self, interaction: discord.Interaction):
+        # ensure applicant row exists / update heartbeat
+        async with bot.db_pool.acquire() as conn:
+            await conn.execute(
+                "INSERT INTO applicants (discord_id, status) VALUES ($1,'in_progress') "
+                "ON CONFLICT (discord_id) DO UPDATE SET last_active = now(), updated_at = now()",
+                self.user_id
+            )
+
         if self.current_index >= len(APPLICATION_QUESTIONS):
             await self.finish(interaction)
             return
+
         q = APPLICATION_QUESTIONS[self.current_index]
+        prompt = q["prompt"]
+        q_code = q["code"]
+
         if q["type"] == "long":
-            modal = ApplicationModal(q["code"], q["prompt"], q.get("min_len", 0), q.get("max_len", 1000))
+            modal = ApplicationModal(q_code, prompt, q.get("min_len", 0), q.get("max_len", 1000))
             await interaction.response.send_modal(modal)
             await modal.wait()
             if modal.answer:
-                self.answers[q["code"]] = modal.answer
+                self.answers[q_code] = modal.answer
+            else:
+                # user closed modal; stop quietly
+                return
         else:
-            await interaction.response.send_message(q["prompt"], ephemeral=True)
+            await interaction.response.send_message(prompt, ephemeral=True)
             try:
                 msg = await bot.wait_for(
                     "message",
-                    check=lambda m: m.author.id == interaction.user.id,
+                    check=lambda m: m.author.id == interaction.user.id and m.channel == interaction.channel,
                     timeout=APPLICATION_TIMEOUT_MINUTES * 60
                 )
-                ans = msg.content.strip()
-                self.answers[q["code"]] = ans
-                await msg.delete()
+                ans = (msg.content or "").strip()
+                if q.get("min_len"):
+                    if len(ans) < q["min_len"]:
+                        await interaction.followup.send(f"Please provide at least **{q['min_len']}** characters.", ephemeral=True)
+                        return
+                if q.get("max_len"):
+                    ans = ans[: q["max_len"]]
+                self.answers[q_code] = ans
+                try:
+                    await msg.delete()
+                except:
+                    pass
             except asyncio.TimeoutError:
                 await interaction.followup.send("⏰ Application timed out. Please restart with `/apply`.", ephemeral=True)
                 return
+
         self.current_index += 1
         if self.current_index < len(APPLICATION_QUESTIONS):
+            # ask next
             await self.ask_next(interaction)
         else:
             await self.finish(interaction)
 
     async def finish(self, interaction: discord.Interaction):
+        # store username into applicants table if present
+        roblox_username = (self.answers.get("roblox_username") or "").strip()
+
         # Insert into DB
         async with bot.db_pool.acquire() as conn:
             applicant_id = await conn.fetchval(
-                "INSERT INTO applicants (discord_id, status, updated_at) VALUES ($1, 'submitted', now()) "
-                "ON CONFLICT (discord_id) DO UPDATE SET status='submitted', updated_at=now() RETURNING id",
-                self.user_id
+                "INSERT INTO applicants (discord_id, roblox_username, status, updated_at) "
+                "VALUES ($1, $2, 'submitted', now()) "
+                "ON CONFLICT (discord_id) DO UPDATE SET roblox_username = EXCLUDED.roblox_username, status='submitted', updated_at=now() "
+                "RETURNING id",
+                self.user_id, roblox_username or None
             )
             run_id = await conn.fetchval(
                 "INSERT INTO application_runs (applicant_id, started_at, submitted_at) VALUES ($1, now(), now()) RETURNING id",
@@ -827,15 +895,20 @@ class ApplyView(discord.ui.View):
             await log_action("Application AI Error", f"User: <@{self.user_id}>\nError: {e}")
             return
 
-        score = float(result.get("overall_score", 0))
-        verdict = result.get("verdict", "reject")
-        rationale = result.get("rationale", "")
+        # Normalize result
+        try:
+            score = float(result.get("overall_score", 0))
+        except:
+            score = 0.0
+        verdict = (result.get("verdict") or "reject").lower()
+        rationale = (result.get("rationale") or "")[:1500]
+
         await log_action(
             "Application Scored",
-            f"User: <@{self.user_id}>\nScore: **{score}**\nVerdict: `{verdict}`\nRationale: {rationale[:150]}..."
+            f"User: <@{self.user_id}>\nScore: **{score:.1f}**\nVerdict: `{verdict}`\nRationale: {rationale[:300]}..."
         )
 
-        # Save AI review + decision
+        # Save AI review + decision placeholder
         async with bot.db_pool.acquire() as conn:
             await conn.execute(
                 "INSERT INTO ai_reviews (run_id, model, score, verdict, rationale) VALUES ($1,$2,$3,$4,$5)",
@@ -844,27 +917,29 @@ class ApplyView(discord.ui.View):
 
         # Auto decision
         if score >= APPLICATION_AUTO_ACCEPT_THRESHOLD and verdict == "accept":
-            await handle_accept(interaction, self.user_id, self.answers)
+            await handle_accept(interaction, self.user_id, self.answers, run_id)
         elif score >= APPLICATION_BORDERLINE_MIN:
-            await handle_borderline(interaction, self.user_id, self.answers, score)
+            await handle_borderline(interaction, self.user_id, self.answers, score, run_id)
         else:
-            await handle_reject(interaction, self.user_id, score, rationale)
+            await handle_reject(interaction, self.user_id, score, rationale, run_id)
 
-async def handle_accept(interaction: discord.Interaction, discord_id: int, answers: dict):
-    """Accept, verify Roblox, rank, welcome."""
+async def handle_accept(interaction: discord.Interaction, discord_id: int, answers: dict, run_id: int):
+    """Accept, verify Roblox, accept join request if pending, rank, welcome, and set cooldown."""
     member = find_member(discord_id)
-    roblox_name = answers.get("roblox_username", "").strip()
+    roblox_name = (answers.get("roblox_username") or "").strip()
     if not member:
+        await log_action("Application Accepted (but member missing)", f"User ID: {discord_id}")
         return
 
     # Auto verify Roblox
+    roblox_id = None
     if roblox_name:
         payload = {"usernames": [roblox_name], "excludeBannedUsers": True}
         async with aiohttp.ClientSession() as session:
             async with session.post("https://users.roblox.com/v1/usernames/users", json=payload) as resp:
                 if resp.status == 200:
                     data = await resp.json()
-                    if data["data"]:
+                    if data.get("data"):
                         roblox_id = data["data"][0]["id"]
                         async with bot.db_pool.acquire() as conn:
                             await conn.execute(
@@ -874,60 +949,106 @@ async def handle_accept(interaction: discord.Interaction, discord_id: int, answe
                             )
                         await log_action("Auto Verified", f"User: <@{discord_id}> | Roblox: `{roblox_name}` ({roblox_id})")
 
-    # Auto rank to Medical Student
-    async with bot.db_pool.acquire() as conn:
-        roblox_id = await conn.fetchval("SELECT roblox_id FROM roblox_verification WHERE discord_id=$1", discord_id)
+    # Accept join request if pending, then rank to Medical Student (rankNumber=1 by assumption)
     if roblox_id:
-        await set_group_rank(int(roblox_id), rank_number=1)  # 1 = Medical Student by your group
+        ok = await ensure_member_and_rank(int(roblox_id), rank_number=1)
+        if not ok:
+            # fallback: accept then rank separately
+            await accept_group_join(int(roblox_id))
+            await set_group_rank(int(roblox_id), rank_number=1)
+
+    # Assign Discord role
     if MEDICAL_STUDENT_ROLE_ID:
         role = interaction.guild.get_role(MEDICAL_STUDENT_ROLE_ID)
         if role:
-            await member.add_roles(role, reason="Auto-accepted application")
+            try:
+                await member.add_roles(role, reason="Auto-accepted application")
+            except Exception as e:
+                print(f"Failed to add MEDICAL_STUDENT_ROLE_ID: {e}")
 
-    # Send welcome message
-    comms = bot.get_channel(COMMS_CHANNEL_ID)
+    # Welcome in comms
+    comms = bot.get_channel(COMMS_CHANNEL_ID) if COMMS_CHANNEL_ID else None
     if comms:
-        await comms.send(f"🎉 Please welcome {member.mention} to the **Medical Department**!")
-    await log_action("Application Accepted", f"Auto-accepted: <@{discord_id}>")
+        try:
+            await comms.send(f"🎉 Please welcome {member.mention} to the **Medical Department**!")
+        except Exception as e:
+            print(f"Failed to send welcome: {e}")
 
+    # Store decision + cooldown
+    async with bot.db_pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO decisions (run_id, decided_by, decision, reason) VALUES ($1,$2,$3,$4)",
+            run_id, "ai", "accept", "Auto-accepted by AI threshold"
+        )
+        await conn.execute(
+            "UPDATE applicants SET status='accepted', cooldown_until = (now() + ($1 || ' hours')::interval), updated_at=now() WHERE discord_id=$2",
+            APPLICATION_COOLDOWN_HOURS, discord_id
+        )
+
+    await log_action("Application Accepted", f"Auto-accepted: <@{discord_id}>")
     await interaction.followup.send(f"✅ Application accepted for {member.mention}!", ephemeral=True)
 
-async def handle_borderline(interaction, discord_id, answers, score):
-    """Queue for manual review"""
+async def handle_borderline(interaction, discord_id, answers, score, run_id):
+    """Queue for manual review."""
     member = find_member(discord_id)
     comms = bot.get_channel(COMMS_CHANNEL_ID)
-    await log_action("Application Borderline", f"<@{discord_id}> — Score: {score}")
+    await log_action("Application Borderline", f"<@{discord_id}> — Score: {score:.1f}")
     if comms:
         await comms.send(
-            f"🟡 Application borderline — needs manual review.\nUser: {member.mention if member else discord_id}\nScore: **{score}**"
+            f"🟡 Application borderline — needs manual review.\nUser: {member.mention if member else discord_id}\nScore: **{score:.1f}**"
+        )
+    async with bot.db_pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO decisions (run_id, decided_by, decision, reason) VALUES ($1,$2,$3,$4)",
+            run_id, "ai", "borderline", "Below auto-accept threshold but above minimum"
+        )
+        await conn.execute(
+            "UPDATE applicants SET status='submitted', cooldown_until=NULL, updated_at=now() WHERE discord_id=$1",
+            discord_id
         )
     await interaction.followup.send("⚠️ Application under manual review.", ephemeral=True)
 
-async def handle_reject(interaction, discord_id, score, rationale):
+async def handle_reject(interaction, discord_id, score, rationale, run_id):
     """Reject application."""
     member = find_member(discord_id)
     if member:
         try:
             await member.send(
                 f"Hello — thank you for applying to the **Medical Department**, but unfortunately your application has not been accepted.\n\n"
-                f"**Score:** {score}\nReasoning:\n> {rationale[:300]}"
+                f"**Score:** {score:.1f}\nReasoning:\n> {rationale[:500]}"
             )
         except:
             pass
-    await log_action("Application Rejected", f"User: <@{discord_id}> | Score: {score}")
+    async with bot.db_pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO decisions (run_id, decided_by, decision, reason) VALUES ($1,$2,$3,$4)",
+            run_id, "ai", "reject", rationale[:500]
+        )
+        await conn.execute(
+            "UPDATE applicants SET status='rejected', cooldown_until = (now() + ($1 || ' hours')::interval), updated_at=now() WHERE discord_id=$2",
+            APPLICATION_COOLDOWN_HOURS, discord_id
+        )
+    await log_action("Application Rejected", f"User: <@{discord_id}> | Score: {score:.1f}")
     await interaction.followup.send("❌ Application rejected.", ephemeral=True)
 
 # /apply command
 @bot.tree.command(name="apply", description="Begin your Medical Department application.")
 async def apply(interaction: discord.Interaction):
+    # Cooldown check
     async with bot.db_pool.acquire() as conn:
         cooldown = await conn.fetchval("SELECT cooldown_until FROM applicants WHERE discord_id=$1", interaction.user.id)
         if cooldown and cooldown > utcnow():
             remain = human_remaining(cooldown - utcnow())
             await interaction.response.send_message(
-                f"You must wait {remain} before applying again.", ephemeral=True
+                f"You must wait **{remain}** before applying again.", ephemeral=True
             )
             return
+        # bootstrap row
+        await conn.execute(
+            "INSERT INTO applicants (discord_id, status) VALUES ($1,'in_progress') "
+            "ON CONFLICT (discord_id) DO UPDATE SET status='in_progress', updated_at=now(), last_active=now()",
+            interaction.user.id
+        )
 
     view = ApplyView(interaction.user.id)
     await interaction.response.send_message(
@@ -937,9 +1058,9 @@ async def apply(interaction: discord.Interaction):
     )
 
 # === PART 2/3 END ===
-# Reply "next" to receive PART 3/3 — final section with /welcome, /dm, orientation, strikes, excuses, weekly loop, and bot.run().
+# Reply "next" to receive PART 3/3 — remaining commands (tasks/orientation/strikes/excuses), loops, /rank, and bot.run().
 # main.py (Medical Department bot) — PART 3/3
-# Continues from Part 2 — original commands restored + loops + /rank + bot.run()
+# Continues directly from Part 2 — announcements, tasks, orientation/strikes/excuses, loops, /rank, and bot.run().
 
 # ---------- Announcements ----------
 class AnnouncementForm(discord.ui.Modal, title='Send Announcement'):
