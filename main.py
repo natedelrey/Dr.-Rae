@@ -72,8 +72,7 @@ ROBLOX_REMOVE_SECRET = os.getenv("ROBLOX_REMOVE_SECRET") or None
 ROBLOX_GROUP_ID      = os.getenv("ROBLOX_GROUP_ID") or None  # optional, forwarded if present
 
 # Roblox rank configuration for automatic onboarding
-AUTO_ACCEPT_GROUP_ROLE_NAME   = os.getenv("AUTO_ACCEPT_GROUP_ROLE_NAME") or None
-AUTO_ACCEPT_GROUP_RANK_NUMBER = getenv_int("AUTO_ACCEPT_GROUP_RANK_NUMBER")
+AUTO_ACCEPT_GROUP_ROLE_NAME   = os.getenv("AUTO_ACCEPT_GROUP_ROLE_NAME") or "Medical Student"
 
 # Rank manager role (can run /rank)
 RANK_MANAGER_ROLE_ID = getenv_int("RANK_MANAGER_ROLE_ID", 1405979816120942702)
@@ -1204,41 +1203,42 @@ async def handle_accept(interaction: discord.Interaction, discord_id: int, answe
 
     # Accept join request if pending, then rank to the configured Roblox group role
     if roblox_id:
-        target_role = None
         ensure_kwargs: dict[str, int] = {}
         target_role_name: str | None = None
-        if AUTO_ACCEPT_GROUP_ROLE_NAME:
-            target_role = await find_group_role_by_name(AUTO_ACCEPT_GROUP_ROLE_NAME)
-            if not target_role:
-                print(f"[WARN] Auto-accept Roblox role '{AUTO_ACCEPT_GROUP_ROLE_NAME}' not found in group ranks.")
-            elif target_role.get("id"):
+        target_role = await find_group_role_by_name(AUTO_ACCEPT_GROUP_ROLE_NAME)
+        if not target_role:
+            print(
+                f"[WARN] Auto-accept Roblox role '{AUTO_ACCEPT_GROUP_ROLE_NAME}' not found in group ranks."
+            )
+        else:
+            role_name = str(target_role.get("name") or "").strip()
+            target_role_name = role_name or AUTO_ACCEPT_GROUP_ROLE_NAME
+            role_id = target_role.get("id")
+            if role_id is not None:
                 try:
-                    ensure_kwargs["role_id"] = int(target_role["id"])
+                    ensure_kwargs["role_id"] = int(role_id)
                 except Exception:
                     pass
-
-        if target_role:
-            name_val = str(target_role.get("name") or "").strip()
-            target_role_name = name_val or None
-
+            if not ensure_kwargs:
+                rank_value = target_role.get("rank")
+                if rank_value is None:
+                    rank_value = target_role.get("rankNumber")
+                if rank_value is not None:
+                    try:
+                        ensure_kwargs["rank_number"] = int(rank_value)
+                    except Exception:
+                        pass
         if not ensure_kwargs:
-            rank_value = None
-            if target_role is not None:
-                rank_value = target_role.get("rank") if target_role.get("rank") is not None else target_role.get("rankNumber")
-            if rank_value is None and AUTO_ACCEPT_GROUP_RANK_NUMBER is not None:
-                rank_value = AUTO_ACCEPT_GROUP_RANK_NUMBER
-            if rank_value is None:
-                rank_value = 1  # maintain previous default behaviour
-            try:
-                ensure_kwargs["rank_number"] = int(rank_value)
-            except Exception:
-                pass
-
-        roblox_rank_success = await ensure_member_and_rank(int(roblox_id), **ensure_kwargs)
-        if not roblox_rank_success:
-            # fallback: accept then rank separately
-            await accept_group_join(int(roblox_id))
-            roblox_rank_success = await set_group_rank(int(roblox_id), **ensure_kwargs)
+            print(
+                f"[WARN] Unable to determine Roblox role ID or rank number for '{AUTO_ACCEPT_GROUP_ROLE_NAME}'."
+            )
+            roblox_rank_success = False
+        else:
+            roblox_rank_success = await ensure_member_and_rank(int(roblox_id), **ensure_kwargs)
+            if not roblox_rank_success:
+                # fallback: accept then rank separately
+                await accept_group_join(int(roblox_id))
+                roblox_rank_success = await set_group_rank(int(roblox_id), **ensure_kwargs)
 
         if roblox_rank_success and not target_role_name:
             # Attempt to resolve the role name by the rank number if available
