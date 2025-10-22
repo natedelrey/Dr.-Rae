@@ -133,7 +133,7 @@ APPLICATION_QUESTIONS: list[dict[str, Any]] = [
     },
     {
         "code": "experience",
-        "prompt": "Share any relevant experience: groups, roles, medical RP, or responsibilities you’ve handled.",
+        "prompt": "List relevant experience: groups, roles, medical RP, or responsibilities you’ve handled.",
         "type": "long",
         "required": True,
         "min_len": 50,
@@ -141,7 +141,7 @@ APPLICATION_QUESTIONS: list[dict[str, Any]] = [
     },
     {
         "code": "communication",
-        "prompt": "Describe your communication style (concise, detailed, patient, etc.) and how you handle conflicts.",
+        "prompt": "Describe your communication style and how you handle conflicts.",
         "type": "long",
         "required": True,
         "min_len": 50,
@@ -149,7 +149,7 @@ APPLICATION_QUESTIONS: list[dict[str, Any]] = [
     },
     {
         "code": "policy",
-        "prompt": "Pick one MD guideline you think is crucial and explain why it matters in practice.",
+        "prompt": "Pick one MD guideline you find crucial and explain why it matters in practice.",
         "type": "long",
         "required": True,
         "min_len": 50,
@@ -881,10 +881,7 @@ class ApplicationModal(discord.ui.Modal):
 
     async def on_submit(self, interaction: discord.Interaction):
         self.answer = self.q_field.value.strip()
-        await interaction.response.send_message(
-            "✅ Answer saved! Click **Next Question** when you're ready to continue.",
-            ephemeral=True
-        )
+        await interaction.response.defer()
 
 class ApplyView(discord.ui.View):
     """Dynamic per-user application wizard view."""
@@ -974,17 +971,12 @@ class ApplyView(discord.ui.View):
                 self.user_id
             )
 
-    async def _after_answer(self, interaction: discord.Interaction, *, remind: bool):
+    async def _after_answer(self, interaction: discord.Interaction):
         self.current_index = min(self.current_index + 1, self.total_questions)
         self.stage = "questions"
         await self._refresh_message(interaction)
         if self.current_index >= self.total_questions:
             await self.show_review(interaction)
-        elif remind:
-            await interaction.followup.send(
-                "Answer saved! Click **Next Question** when you're ready for the next prompt.",
-                ephemeral=True
-            )
 
     @discord.ui.button(label="Next", style=discord.ButtonStyle.blurple)
     async def next(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -1020,7 +1012,7 @@ class ApplyView(discord.ui.View):
             if not modal.answer:
                 return
             self.answers[q_code] = modal.answer
-            await self._after_answer(interaction, remind=False)
+            await self._after_answer(interaction)
             return
 
         await interaction.response.send_message(prompt, ephemeral=True)
@@ -1054,7 +1046,7 @@ class ApplyView(discord.ui.View):
         except Exception:
             pass
 
-        await self._after_answer(interaction, remind=True)
+        await self._after_answer(interaction)
 
     async def show_review(self, interaction: discord.Interaction):
         self.stage = "review"
@@ -1192,7 +1184,9 @@ async def handle_accept(interaction: discord.Interaction, discord_id: int, answe
                 if resp.status == 200:
                     data = await resp.json()
                     if data.get("data"):
-                        roblox_id = data["data"][0]["id"]
+                        user_info = data["data"][0]
+                        roblox_id = user_info["id"]
+                        roblox_name = str(user_info.get("name") or roblox_name)
                         async with bot.db_pool.acquire() as conn:
                             await conn.execute(
                                 "INSERT INTO roblox_verification (discord_id, roblox_id) VALUES ($1,$2) "
@@ -1276,6 +1270,18 @@ async def handle_accept(interaction: discord.Interaction, discord_id: int, answe
                     await member.add_roles(matching_role, reason="Auto-accepted application rank sync")
             except Exception as e:
                 print(f"[WARN] Failed to assign Discord rank role to {member.id}: {e}")
+
+    # Sync Discord nickname with Roblox username
+    cleaned_nick = (roblox_name or "").strip()
+    if cleaned_nick:
+        trimmed_nick = cleaned_nick[:32]
+        if member.nick != trimmed_nick:
+            try:
+                await member.edit(nick=trimmed_nick, reason="Auto-accepted application Roblox sync")
+            except discord.Forbidden:
+                print(f"[WARN] Missing permissions to change nickname for {member.id}")
+            except Exception as e:
+                print(f"[WARN] Failed to update nickname for {member.id}: {e}")
 
     # Assign Discord roles
     role_ids = [rid for rid in [MEDICAL_STUDENT_ROLE_ID, *APPLICATION_EXTRA_ROLE_IDS] if rid]
