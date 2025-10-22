@@ -1206,6 +1206,7 @@ async def handle_accept(interaction: discord.Interaction, discord_id: int, answe
     if roblox_id:
         target_role = None
         ensure_kwargs: dict[str, int] = {}
+        target_role_name: str | None = None
         if AUTO_ACCEPT_GROUP_ROLE_NAME:
             target_role = await find_group_role_by_name(AUTO_ACCEPT_GROUP_ROLE_NAME)
             if not target_role:
@@ -1215,6 +1216,10 @@ async def handle_accept(interaction: discord.Interaction, discord_id: int, answe
                     ensure_kwargs["role_id"] = int(target_role["id"])
                 except Exception:
                     pass
+
+        if target_role:
+            name_val = str(target_role.get("name") or "").strip()
+            target_role_name = name_val or None
 
         if not ensure_kwargs:
             rank_value = None
@@ -1229,11 +1234,48 @@ async def handle_accept(interaction: discord.Interaction, discord_id: int, answe
             except Exception:
                 pass
 
-        ok = await ensure_member_and_rank(int(roblox_id), **ensure_kwargs)
-        if not ok:
+        roblox_rank_success = await ensure_member_and_rank(int(roblox_id), **ensure_kwargs)
+        if not roblox_rank_success:
             # fallback: accept then rank separately
             await accept_group_join(int(roblox_id))
-            await set_group_rank(int(roblox_id), **ensure_kwargs)
+            roblox_rank_success = await set_group_rank(int(roblox_id), **ensure_kwargs)
+
+        if roblox_rank_success and not target_role_name:
+            # Attempt to resolve the role name by the rank number if available
+            rank_number = ensure_kwargs.get("rank_number")
+            if rank_number is not None:
+                roles = await fetch_group_ranks()
+                for role in roles:
+                    role_rank = role.get("rank") if role.get("rank") is not None else role.get("rankNumber")
+                    if role_rank == rank_number:
+                        candidate_name = str(role.get("name") or "").strip()
+                        if candidate_name:
+                            target_role_name = candidate_name
+                        break
+
+        if roblox_rank_success and target_role_name:
+            try:
+                async with bot.db_pool.acquire() as conn:
+                    await conn.execute(
+                        "INSERT INTO member_ranks (discord_id, rank, set_by, set_at) VALUES ($1, $2, $3, $4) "
+                        "ON CONFLICT (discord_id) DO UPDATE SET rank = EXCLUDED.rank, set_by = EXCLUDED.set_by, set_at = EXCLUDED.set_at",
+                        member.id,
+                        target_role_name,
+                        bot.user.id if bot.user else None,
+                        utcnow(),
+                    )
+            except Exception as e:
+                print(f"[WARN] Failed to record auto rank for {member.id}: {e}")
+
+            try:
+                matching_role = next(
+                    (role for role in interaction.guild.roles if role.name.lower() == target_role_name.lower()),
+                    None,
+                )
+                if matching_role and matching_role not in member.roles:
+                    await member.add_roles(matching_role, reason="Auto-accepted application rank sync")
+            except Exception as e:
+                print(f"[WARN] Failed to assign Discord rank role to {member.id}: {e}")
 
     # Assign Discord roles
     role_ids = [rid for rid in [MEDICAL_STUDENT_ROLE_ID, *APPLICATION_EXTRA_ROLE_IDS] if rid]
