@@ -29,13 +29,12 @@ ANNOUNCEMENT_CHANNEL_ID      = getenv_int("ANNOUNCEMENT_CHANNEL_ID")
 LOG_CHANNEL_ID               = getenv_int("LOG_CHANNEL_ID")
 ANNOUNCEMENT_ROLE_ID         = getenv_int("ANNOUNCEMENT_ROLE_ID")
 MANAGEMENT_ROLE_ID           = getenv_int("MANAGEMENT_ROLE_ID")
-AA_CHANNEL_ID                = getenv_int("AA_CHANNEL_ID")
-ANOMALY_ACTORS_ROLE_ID       = getenv_int("ANOMALY_ACTORS_ROLE_ID")
 DEPARTMENT_ROLE_ID           = getenv_int("DEPARTMENT_ROLE_ID")
 MEDICAL_STUDENT_ROLE_ID      = getenv_int("MEDICAL_STUDENT_ROLE_ID")
 ORIENTATION_ALERT_CHANNEL_ID = getenv_int("ORIENTATION_ALERT_CHANNEL_ID")
 COMMAND_LOG_CHANNEL_ID       = getenv_int("COMMAND_LOG_CHANNEL_ID", 1416965696230789150)
 ACTIVITY_LOG_CHANNEL_ID      = getenv_int("ACTIVITY_LOG_CHANNEL_ID", 1409646416829354095)
+COMMS_CHANNEL_ID             = getenv_int("COMMS_CHANNEL_ID")
 
 # DB / API
 DATABASE_URL   = os.getenv("DATABASE_URL")
@@ -842,35 +841,131 @@ async def dm(interaction: discord.Interaction, member: discord.Member, title: st
         await interaction.response.send_message("An unexpected error occurred.", ephemeral=True)
         print(f"DM command error: {e}")
 
-# /aa (mgmt, cooldown)
-@bot.tree.command(name="aa", description="Ping Anomaly Actors to get on-site for a checkup.")
+# /verification audit (mgmt)
+@bot.tree.command(
+    name="verification_audit",
+    description="(Mgmt) List members missing /verify and optionally ping them in comms.",
+)
 @app_commands.checks.has_role(MANAGEMENT_ROLE_ID)
-@app_commands.checks.cooldown(1, 300.0, key=lambda i: i.user.id)
-async def aa(interaction: discord.Interaction, note: str | None = None):
-    target_channel = bot.get_channel(AA_CHANNEL_ID)
-    if not target_channel:
-        await interaction.response.send_message("Could not find the AA announcement channel.", ephemeral=True)
+async def verification_audit(interaction: discord.Interaction, ping: bool = False):
+    await interaction.response.defer(ephemeral=True, thinking=True)
+
+    guild = interaction.guild
+    if not guild:
+        await interaction.followup.send("This command can only be used inside the server.", ephemeral=True)
         return
 
-    role = interaction.guild.get_role(ANOMALY_ACTORS_ROLE_ID)
-    if not role:
-        await interaction.response.send_message("Could not find the Anomaly Actors role.", ephemeral=True)
+    roles_to_check: list[discord.Role] = []
+    for role_id in (DEPARTMENT_ROLE_ID, MEDICAL_STUDENT_ROLE_ID):
+        if not role_id:
+            continue
+        role = guild.get_role(role_id)
+        if role:
+            roles_to_check.append(role)
+
+    if not roles_to_check:
+        await interaction.followup.send(
+            "No department or medical student roles are configured, so I can't audit verification.",
+            ephemeral=True,
+        )
         return
 
-    title = "🧪 Anomaly Actors Checkup Call"
-    body = [
-        f"{role.mention}, please get on-site for a quick **Anomaly Actors checkup**.",
-        "Check the radio for further instructions."
+    members_to_check: dict[int, discord.Member] = {}
+    for role in roles_to_check:
+        for member in role.members:
+            if member.bot:
+                continue
+            members_to_check[member.id] = member
+
+    if not members_to_check:
+        await interaction.followup.send(
+            "I couldn't find any members in the configured roles to audit.",
+            ephemeral=True,
+        )
+        return
+
+    async with bot.db_pool.acquire() as conn:
+        rows = await conn.fetch("SELECT discord_id FROM roblox_verification")
+    verified_ids = {int(row["discord_id"]) for row in rows}
+
+    missing_members = [member for member in members_to_check.values() if member.id not in verified_ids]
+    missing_members.sort(key=lambda m: (m.display_name.lower(), m.id))
+
+    ping_result: str | None = None
+    ping_sent = False
+
+    if ping:
+        if not missing_members:
+            ping_result = "Everyone is already verified, so no ping was sent."
+        else:
+            comms_channel = bot.get_channel(COMMS_CHANNEL_ID) if COMMS_CHANNEL_ID else None
+            if not comms_channel:
+                ping_result = "The comms channel isn't configured."
+            else:
+                allowed_mentions = discord.AllowedMentions(users=True)
+                reminder = (
+                    "Please run `/verify` with your Roblox username so your activity can be logged accurately."
+                )
+
+                def mention_chunks(max_len: int = 1800):
+                    chunk: list[str] = []
+                    length = 0
+                    for member in missing_members:
+                        mention = member.mention
+                        additional = len(mention) + (1 if chunk else 0)
+                        if length + additional > max_len:
+                            if chunk:
+                                yield " ".join(chunk)
+                            chunk = [mention]
+                            length = len(mention)
+                        else:
+                            if chunk:
+                                length += 1
+                            chunk.append(mention)
+                            length += len(mention)
+                    if chunk:
+                        yield " ".join(chunk)
+
+                for chunk in mention_chunks():
+                    await comms_channel.send(
+                        content=f"{chunk}\n\n{reminder}",
+                        allowed_mentions=allowed_mentions,
+                    )
+                ping_result = f"Ping sent in {comms_channel.mention}."
+                ping_sent = True
+
+    messages: list[str] = []
+    if missing_members:
+        header = f"**{len(missing_members)}** member(s) still need to complete `/verify`."
+        if ping_result:
+            header += f"\n{ping_result}"
+        lines = [f"- {member.mention} ({member.display_name})" for member in missing_members]
+        chunks = smart_chunk("\n".join(lines), size=1800)
+        if chunks:
+            messages.append(f"{header}\n{chunks[0]}" if chunks[0] else header)
+            for chunk in chunks[1:]:
+                messages.append(chunk)
+        else:
+            messages.append(header)
+    else:
+        text = "Everyone in the configured roles has completed `/verify`. ✅"
+        if ping_result:
+            text += f"\n{ping_result}"
+        messages.append(text)
+
+    for msg in messages:
+        await interaction.followup.send(msg, ephemeral=True)
+
+    log_lines = [
+        f"By: {interaction.user.mention}",
+        f"Missing members: {len(missing_members)}",
+        f"Ping requested: {'✅' if ping else '❌'}",
+        f"Ping sent: {'✅' if ping_sent else '❌'}",
     ]
-    if note:
-        body.append(f"\n**Note:** {note}")
+    if ping_result:
+        log_lines.append(f"Note: {ping_result}")
 
-    embed = discord.Embed(title=title, description="\n".join(body), color=discord.Color.purple(), timestamp=utcnow())
-    embed.set_footer(text=f"Requested by {interaction.user.display_name}")
-
-    await target_channel.send(content=f"{role.mention}", embed=embed, allowed_mentions=discord.AllowedMentions(roles=True))
-    await log_action("AA Ping Sent", f"By: {interaction.user.mention}\nChannel: {target_channel.mention}")
-    await interaction.response.send_message("Anomaly Actors have been pinged for a checkup.", ephemeral=True)
+    await log_action("Verification Audit", "\n".join(log_lines))
 
 # --- Orientation helpers/commands ---
 
