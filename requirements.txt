@@ -2,3 +2,4 @@ discord.py>=2.3.2
 python-dotenv
 aiohttp
 asyncpg
+openai>=1.40.0
