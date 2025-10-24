@@ -332,13 +332,63 @@ class GuidelineStore:
                         parsed_sections.append({"title": title, "text": text.strip()})
 
         if not parsed_sections:
-            # Treat as raw plaintext/markdown; split on blank lines
-            for block in self.raw_text.split("\n\n"):
-                section_text = block.strip()
-                if not section_text:
+            # Treat as raw plaintext/markdown; build sections around headings so
+            # the bullets that follow stay grouped with their parent header.
+            def is_heading(line: str) -> bool:
+                stripped = line.strip()
+                if not stripped or stripped.startswith("---"):
+                    return False
+                if stripped.startswith("PART "):
+                    return True
+                if stripped.startswith("§"):
+                    return True
+                if stripped.startswith("LEVEL "):
+                    return True
+                # Lines that are all caps (ignoring punctuation) are often
+                # headings in the handbook.
+                alpha = re.sub(r"[^A-Z]", "", stripped.upper())
+                return bool(alpha) and stripped == stripped.upper()
+
+            sections: list[dict[str, str]] = []
+            current_title: str | None = None
+            current_lines: list[str] = []
+
+            def flush_section() -> None:
+                nonlocal current_title, current_lines
+                if not current_lines:
+                    current_title = None
+                    return
+                text = "\n".join(line.rstrip() for line in current_lines).strip()
+                if not text:
+                    current_title = None
+                    current_lines = []
+                    return
+                title = current_title or text.splitlines()[0].strip()
+                sections.append({"title": title, "text": text})
+                current_title = None
+                current_lines = []
+
+            for raw_line in self.raw_text.splitlines():
+                if raw_line.strip().startswith("---"):
+                    flush_section()
                     continue
-                title_line = section_text.splitlines()[0].strip()
-                parsed_sections.append({"title": title_line, "text": section_text})
+                if is_heading(raw_line):
+                    flush_section()
+                    current_title = raw_line.strip()
+                    current_lines = [raw_line]
+                    continue
+                if not raw_line.strip():
+                    if current_lines and current_lines[-1] != "":
+                        current_lines.append("")
+                    continue
+                if not current_lines:
+                    current_title = raw_line.strip()
+                    current_lines = [raw_line]
+                else:
+                    current_lines.append(raw_line)
+
+            flush_section()
+            parsed_sections = sections
 
         self.sections = parsed_sections
         self.section_tokens = []
