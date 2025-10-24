@@ -14,6 +14,7 @@ from discord import app_commands
 import asyncio
 from urllib.parse import urlparse
 import json
+from pathlib import Path
 import re
 from typing import Optional, Any
 from discord.utils import escape_markdown
@@ -287,7 +288,10 @@ def is_probably_troll(text: str) -> bool:
 
 class GuidelineStore:
     def __init__(self, path: str):
-        self.path = path
+        base_path = Path(path)
+        if not base_path.is_absolute():
+            base_path = Path(__file__).resolve().parent / base_path
+        self.path = str(base_path)
         self.raw_text: str = ""
         self.sections: list[dict[str, str]] = []
         self.section_tokens: list[set[str]] = []
