@@ -328,13 +328,63 @@ class GuidelineStore:
                         parsed_sections.append({"title": title, "text": text.strip()})
 
         if not parsed_sections:
-            # Treat as raw plaintext/markdown; split on blank lines
-            for block in self.raw_text.split("\n\n"):
-                section_text = block.strip()
-                if not section_text:
+            # Treat as raw plaintext/markdown; build sections around headings so
+            # the bullets that follow stay grouped with their parent header.
+            def is_heading(line: str) -> bool:
+                stripped = line.strip()
+                if not stripped or stripped.startswith("---"):
+                    return False
+                if stripped.startswith("PART "):
+                    return True
+                if stripped.startswith("§"):
+                    return True
+                if stripped.startswith("LEVEL "):
+                    return True
+                # Lines that are all caps (ignoring punctuation) are often
+                # headings in the handbook.
+                alpha = re.sub(r"[^A-Z]", "", stripped.upper())
+                return bool(alpha) and stripped == stripped.upper()
+
+            sections: list[dict[str, str]] = []
+            current_title: str | None = None
+            current_lines: list[str] = []
+
+            def flush_section() -> None:
+                nonlocal current_title, current_lines
+                if not current_lines:
+                    current_title = None
+                    return
+                text = "\n".join(line.rstrip() for line in current_lines).strip()
+                if not text:
+                    current_title = None
+                    current_lines = []
+                    return
+                title = current_title or text.splitlines()[0].strip()
+                sections.append({"title": title, "text": text})
+                current_title = None
+                current_lines = []
+
+            for raw_line in self.raw_text.splitlines():
+                if raw_line.strip().startswith("---"):
+                    flush_section()
                     continue
-                title_line = section_text.splitlines()[0].strip()
-                parsed_sections.append({"title": title_line, "text": section_text})
+                if is_heading(raw_line):
+                    flush_section()
+                    current_title = raw_line.strip()
+                    current_lines = [raw_line]
+                    continue
+                if not raw_line.strip():
+                    if current_lines and current_lines[-1] != "":
+                        current_lines.append("")
+                    continue
+                if not current_lines:
+                    current_title = raw_line.strip()
+                    current_lines = [raw_line]
+                else:
+                    current_lines.append(raw_line)
+
+            flush_section()
+            parsed_sections = sections
 
         self.sections = parsed_sections
         self.section_tokens = []
@@ -632,7 +682,12 @@ class SimpleOpenAI:
             raise RuntimeError("Missing OPENAI_API_KEY for guidelines support.")
         system_prompt = (
             "You are Dr. Rae, a friendly yet professional assistant for the SCPF Medical Department. "
-            "Use the provided guideline excerpts to answer member questions conversationally. "
+            "Rely exclusively on the provided guideline excerpts and any saved member background; treat them as your full "
+            "knowledge base. "
+            "If the excerpts do not contain the requested information, state that you are unsure and invite the member to "
+            "check the handbook or provide more details via the `/guidelines context` command. "
+            "Do not invent or reference real-world medical practices, Roblox platform rules, or anything outside the "
+            "handbook. "
             "Do not quote large passages verbatim; instead, paraphrase and give clear action steps. "
             "Always remind members to follow official procedures if unsure and keep responses respectful. "
             f"Whenever a question touches on quota or activity expectations, spell out the standard requirement of "
@@ -648,6 +703,8 @@ class SimpleOpenAI:
             f"Question: {question}\n\n"
             "Reply with a concise, encouraging explanation and include any key reminders the member should know. "
             "State the exact numbers, deadlines, or channels/forms involved instead of saying 'standard' or 'usual'. "
+            "If an answer would require information that is not in the excerpts, say you are not sure and ask for more "
+            "details or suggest reviewing the handbook section directly. "
             "If the member is asking how to carry out something, outline the steps in order so they can follow them."
         )
         payload = {
@@ -873,6 +930,13 @@ class MD_BOT(commands.Bot):
                         expires_at TIMESTAMPTZ
                     );
                 ''')
+                await connection.execute('''
+                    CREATE TABLE IF NOT EXISTS guideline_context (
+                        discord_id BIGINT PRIMARY KEY,
+                        details TEXT NOT NULL,
+                        updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+                    );
+                ''')
 
                 # === New: Application system tables ===
                 await connection.execute('''
@@ -988,6 +1052,46 @@ class MD_BOT(commands.Bot):
             return roles[0].name
         return "Member"
 
+    async def get_guideline_context(self, discord_id: int) -> str | None:
+        if not self.db_pool:
+            return None
+        try:
+            async with self.db_pool.acquire() as conn:
+                return await conn.fetchval(
+                    "SELECT details FROM guideline_context WHERE discord_id=$1",
+                    discord_id,
+                )
+        except Exception as e:
+            print(f"[WARN] Failed to load guideline context for {discord_id}: {e}")
+            return None
+
+    async def set_guideline_context(self, discord_id: int, details: str) -> None:
+        if not self.db_pool:
+            return
+        try:
+            async with self.db_pool.acquire() as conn:
+                await conn.execute(
+                    "INSERT INTO guideline_context (discord_id, details, updated_at) VALUES ($1, $2, $3) "
+                    "ON CONFLICT (discord_id) DO UPDATE SET details = EXCLUDED.details, updated_at = EXCLUDED.updated_at",
+                    discord_id,
+                    details,
+                    utcnow(),
+                )
+        except Exception as e:
+            print(f"[WARN] Failed to store guideline context for {discord_id}: {e}")
+
+    async def clear_guideline_context(self, discord_id: int) -> None:
+        if not self.db_pool:
+            return
+        try:
+            async with self.db_pool.acquire() as conn:
+                await conn.execute(
+                    "DELETE FROM guideline_context WHERE discord_id=$1",
+                    discord_id,
+                )
+        except Exception as e:
+            print(f"[WARN] Failed to clear guideline context for {discord_id}: {e}")
+
     async def on_message(self, message: discord.Message):
         if message.author.bot:
             return
@@ -1008,25 +1112,49 @@ class MD_BOT(commands.Bot):
                     if self.guidelines.loaded:
                         rank_name = await self.resolve_member_rank(message.author)
                         context = self.guidelines.build_context(content)
-                        try:
-                            reply = await self.ai.answer_guidelines(content, rank_name, context)
-                        except Exception as exc:
-                            print(f"[WARN] Failed to answer guidelines question: {exc}")
-                            reply = (
-                                "I’m having trouble accessing the guidelines right now. "
-                                "Please double-check the handbook or reach out to MD management for help."
+                        extra_context = await self.get_guideline_context(message.author.id)
+                        combined_context = context or ""
+                        if extra_context:
+                            combined_context = (combined_context + "\n\nMember-provided context:\n" + extra_context).strip()
+                        if not combined_context.strip():
+                            unsure = (
+                                "I want to help, but I’m not sure I have the right details yet. "
+                                "Please share more background with `/guidelines context` so I can give an accurate answer."
                             )
-                        if reply:
                             try:
-                                await message.channel.send(reply, reference=message)
-                                await log_action(
-                                    "Guidelines Q&A",
-                                    f"Question by {message.author.mention}:\n{escape_markdown(content)}",
-                                )
+                                await message.channel.send(unsure, reference=message)
                             except Exception as send_exc:
-                                print(f"[WARN] Could not send guidelines reply: {send_exc}")
+                                print(f"[WARN] Could not send guidelines unsure reply: {send_exc}")
+                        else:
+                            try:
+                                async with message.channel.typing():
+                                    reply = await self.ai.answer_guidelines(content, rank_name, combined_context)
+                            except Exception as exc:
+                                print(f"[WARN] Failed to answer guidelines question: {exc}")
+                                reply = (
+                                    "I’m having trouble accessing the guidelines right now. "
+                                    "Please double-check the handbook or reach out to MD management for help."
+                                )
+                            if reply:
+                                try:
+                                    await message.channel.send(reply, reference=message)
+                                    await log_action(
+                                        "Guidelines Q&A",
+                                        f"Question by {message.author.mention}:\n{escape_markdown(content)}",
+                                    )
+                                except Exception as send_exc:
+                                    print(f"[WARN] Could not send guidelines reply: {send_exc}")
                     else:
                         print("[WARN] Guidelines requested but store is not loaded.")
+                else:
+                    unsure = (
+                        "I’m not completely sure how to answer that. "
+                        "If you can include more details or use `/guidelines context` to share background, I can give a better reply."
+                    )
+                    try:
+                        await message.channel.send(unsure, reference=message)
+                    except Exception as send_exc:
+                        print(f"[WARN] Could not send unsure guidelines prompt: {send_exc}")
 
         await super().on_message(message)
 
@@ -1101,6 +1229,7 @@ tasks_group = app_commands.Group(name="tasks", description="Commands for trackin
 orientation_group = app_commands.Group(name="orientation", description="Manage member orientation progress.")
 strikes_group = app_commands.Group(name="strikes", description="Manage member strikes.")
 excuses_group = app_commands.Group(name="excuses", description="Manage activity excuses.")
+guidelines_group = app_commands.Group(name="guidelines", description="Help Dr. Rae answer guideline questions accurately.")
 
 # === Events ===
 @bot.event
@@ -1138,6 +1267,56 @@ async def global_app_command_error(interaction: discord.Interaction, error: app_
                 await interaction.response.send_message("Sorry, something went wrong running that command.", ephemeral=True)
             except:
                 pass
+
+@guidelines_group.command(name="context", description="Save extra background so Dr. Rae can tailor answers to you.")
+@app_commands.describe(details="Key responsibilities, roles, or expectations you want Dr. Rae to remember (max 1000 characters).")
+async def guidelines_context(interaction: discord.Interaction, details: str):
+    await bot.ensure_bootstrap()
+    trimmed = details.strip()
+    if not trimmed:
+        await interaction.response.send_message("Please include a little information for me to remember.", ephemeral=True)
+        return
+    if len(trimmed) > 1000:
+        await interaction.response.send_message("Please keep the saved context under 1000 characters.", ephemeral=True)
+        return
+    await bot.set_guideline_context(interaction.user.id, trimmed)
+    await log_action(
+        "Guidelines Context Updated",
+        f"User: {interaction.user.mention}\nDetails: {escape_markdown(trimmed)}",
+    )
+    await interaction.response.send_message(
+        "Got it! I’ll factor that in when answering your future guideline questions.",
+        ephemeral=True,
+    )
+
+@guidelines_group.command(name="show_context", description="See what extra background Dr. Rae currently remembers about you.")
+async def guidelines_show_context(interaction: discord.Interaction):
+    await bot.ensure_bootstrap()
+    details = await bot.get_guideline_context(interaction.user.id)
+    if details:
+        await interaction.response.send_message(
+            f"Here’s what I have saved right now:\n\n{details}",
+            ephemeral=True,
+        )
+    else:
+        await interaction.response.send_message(
+            "I don’t have any extra context saved for you yet. Use `/guidelines context` to add some!",
+            ephemeral=True,
+        )
+
+@guidelines_group.command(name="clear_context", description="Remove any extra background saved for guideline answers.")
+async def guidelines_clear_context(interaction: discord.Interaction):
+    await bot.ensure_bootstrap()
+    existing = await bot.get_guideline_context(interaction.user.id)
+    if not existing:
+        await interaction.response.send_message("There isn’t any saved context to clear.", ephemeral=True)
+        return
+    await bot.clear_guideline_context(interaction.user.id)
+    await log_action(
+        "Guidelines Context Cleared",
+        f"User: {interaction.user.mention}",
+    )
+    await interaction.response.send_message("All set. I’ve cleared your saved context.", ephemeral=True)
 
 # === PART 1/3 END ===
 # Reply "next" and I'll send PART 2/3 with: /verify, the /apply wizard, AI review, and auto-accept (including accept-join → rank → welcome).
@@ -2678,6 +2857,7 @@ bot.tree.add_command(tasks_group)
 bot.tree.add_command(orientation_group)
 bot.tree.add_command(strikes_group)
 bot.tree.add_command(excuses_group)
+bot.tree.add_command(guidelines_group)
 
 # ---------- Run ----------
 if __name__ == "__main__":
