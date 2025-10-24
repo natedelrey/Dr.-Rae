@@ -986,24 +986,273 @@ class MD_BOT(commands.Bot):
                     q["code"], q["prompt"], q["type"], idx
                 )
 
-        print("[DB] Tables ready.")
+        async with self._bootstrap_lock:
+            if self._bootstrap_complete or not self.db_pool:
+                return
 
-        # Sync slash commands
-        try:
-            synced = await self.tree.sync()
-            print(f"[Slash] Synced {len(synced)} command(s)")
-        except Exception as e:
-            print(f"[Slash] Sync failed: {e}")
+            async with self.db_pool.acquire() as connection:
+                # Existing tables
+                await connection.execute('''
+                    CREATE TABLE IF NOT EXISTS weekly_tasks (
+                        member_id BIGINT PRIMARY KEY,
+                        tasks_completed INT DEFAULT 0
+                    );
+                ''')
+                await connection.execute('''
+                    CREATE TABLE IF NOT EXISTS task_logs (
+                        log_id SERIAL PRIMARY KEY,
+                        member_id BIGINT,
+                        task TEXT,
+                        task_type TEXT,
+                        proof_url TEXT,
+                        comments TEXT,
+                        timestamp TIMESTAMPTZ
+                    );
+                ''')
+                await connection.execute('''
+                    CREATE TABLE IF NOT EXISTS weekly_task_logs (
+                        log_id SERIAL PRIMARY KEY,
+                        member_id BIGINT,
+                        task TEXT,
+                        task_type TEXT,
+                        proof_url TEXT,
+                        comments TEXT,
+                        timestamp TIMESTAMPTZ
+                    );
+                ''')
+                await connection.execute('''
+                    CREATE TABLE IF NOT EXISTS roblox_verification (
+                        discord_id BIGINT PRIMARY KEY,
+                        roblox_id BIGINT UNIQUE
+                    );
+                ''')
+                await connection.execute('''
+                    CREATE TABLE IF NOT EXISTS roblox_time (
+                        member_id BIGINT PRIMARY KEY,
+                        time_spent INT DEFAULT 0
+                    );
+                ''')
+                await connection.execute('''
+                    CREATE TABLE IF NOT EXISTS roblox_sessions (
+                        roblox_id BIGINT PRIMARY KEY,
+                        start_time TIMESTAMPTZ
+                    );
+                ''')
+                await connection.execute('''
+                    CREATE TABLE IF NOT EXISTS orientations (
+                        discord_id BIGINT PRIMARY KEY,
+                        assigned_at TIMESTAMPTZ,
+                        deadline TIMESTAMPTZ,
+                        passed BOOLEAN DEFAULT FALSE,
+                        passed_at TIMESTAMPTZ,
+                        warned_5d BOOLEAN DEFAULT FALSE,
+                        expired_handled BOOLEAN DEFAULT FALSE
+                    );
+                ''')
+                await connection.execute('''
+                    CREATE TABLE IF NOT EXISTS strikes (
+                        strike_id SERIAL PRIMARY KEY,
+                        member_id BIGINT NOT NULL,
+                        reason TEXT,
+                        issued_at TIMESTAMPTZ NOT NULL,
+                        expires_at TIMESTAMPTZ NOT NULL,
+                        set_by BIGINT,
+                        auto BOOLEAN DEFAULT FALSE
+                    );
+                ''')
 
-        # Web server for Roblox integration
-        app = web.Application()
-        app.router.add_get('/health', lambda _: web.Response(text='ok', status=200))
-        app.router.add_post('/roblox', self.roblox_handler)
-        runner = web.AppRunner(app)
-        await runner.setup()
-        site = web.TCPSite(runner, '0.0.0.0', 8080)
-        await site.start()
-        print("[Web] Server up on :8080 (GET /health, POST /roblox).")
+                # Safety ALTERs for legacy DBs
+                await connection.execute("ALTER TABLE weekly_task_logs ADD COLUMN IF NOT EXISTS task TEXT;")
+                await connection.execute("ALTER TABLE task_logs ADD COLUMN IF NOT EXISTS task TEXT;")
+                await connection.execute("UPDATE weekly_task_logs SET task = COALESCE(task, task_type) WHERE task IS NULL;")
+                await connection.execute("UPDATE task_logs SET task = COALESCE(task, task_type) WHERE task IS NULL;")
+                await connection.execute("ALTER TABLE orientations ADD COLUMN IF NOT EXISTS passed_at TIMESTAMPTZ;")
+                await connection.execute("ALTER TABLE orientations ADD COLUMN IF NOT EXISTS warned_5d BOOLEAN DEFAULT FALSE;")
+                await connection.execute("ALTER TABLE orientations ADD COLUMN IF NOT EXISTS expired_handled BOOLEAN DEFAULT FALSE;")
+                await connection.execute("ALTER TABLE strikes ADD COLUMN IF NOT EXISTS set_by BIGINT;")
+                await connection.execute("ALTER TABLE strikes ADD COLUMN IF NOT EXISTS auto BOOLEAN DEFAULT FALSE;")
+
+                await connection.execute('''
+                    CREATE TABLE IF NOT EXISTS member_ranks (
+                        discord_id BIGINT PRIMARY KEY,
+                        rank TEXT,
+                        set_by BIGINT,
+                        set_at TIMESTAMPTZ
+                    );
+                ''')
+                await connection.execute('''
+                    CREATE TABLE IF NOT EXISTS activity_excuses (
+                        week_key TEXT PRIMARY KEY,
+                        reason TEXT,
+                        set_by BIGINT,
+                        set_at TIMESTAMPTZ
+                    );
+                ''')
+                await connection.execute('''
+                    CREATE TABLE IF NOT EXISTS member_activity_excuses (
+                        member_id BIGINT PRIMARY KEY,
+                        reason TEXT,
+                        set_by BIGINT,
+                        set_at TIMESTAMPTZ,
+                        expires_at TIMESTAMPTZ
+                    );
+                ''')
+
+                # === New: Application system tables ===
+                await connection.execute('''
+                    CREATE TABLE IF NOT EXISTS applicants (
+                        id BIGSERIAL PRIMARY KEY,
+                        discord_id BIGINT UNIQUE NOT NULL,
+                        roblox_username TEXT,
+                        roblox_user_id BIGINT,
+                        status TEXT NOT NULL DEFAULT 'in_progress', -- in_progress|submitted|accepted|rejected
+                        created_at TIMESTAMPTZ DEFAULT now(),
+                        updated_at TIMESTAMPTZ DEFAULT now(),
+                        last_active TIMESTAMPTZ DEFAULT now(),
+                        cooldown_until TIMESTAMPTZ
+                    );
+                ''')
+                await connection.execute('''
+                    CREATE TABLE IF NOT EXISTS application_runs (
+                        id BIGSERIAL PRIMARY KEY,
+                        applicant_id BIGINT REFERENCES applicants(id) ON DELETE CASCADE,
+                        started_at TIMESTAMPTZ DEFAULT now(),
+                        submitted_at TIMESTAMPTZ
+                    );
+                ''')
+                await connection.execute('''
+                    CREATE TABLE IF NOT EXISTS questions (
+                        id SERIAL PRIMARY KEY,
+                        code TEXT UNIQUE NOT NULL,
+                        prompt TEXT NOT NULL,
+                        type TEXT NOT NULL,
+                        order_index INT NOT NULL
+                    );
+                ''')
+                await connection.execute('''
+                    CREATE TABLE IF NOT EXISTS answers (
+                        id BIGSERIAL PRIMARY KEY,
+                        run_id BIGINT REFERENCES application_runs(id) ON DELETE CASCADE,
+                        question_code TEXT NOT NULL,
+                        answer_text TEXT,
+                        created_at TIMESTAMPTZ DEFAULT now()
+                    );
+                ''')
+                await connection.execute('''
+                    CREATE TABLE IF NOT EXISTS ai_reviews (
+                        id BIGSERIAL PRIMARY KEY,
+                        run_id BIGINT REFERENCES application_runs(id) ON DELETE CASCADE,
+                        model TEXT NOT NULL,
+                        score NUMERIC(5,2),
+                        verdict TEXT,
+                        rationale TEXT,
+                        tokens_in INT,
+                        tokens_out INT,
+                        created_at TIMESTAMPTZ DEFAULT now()
+                    );
+                ''')
+                await connection.execute('''
+                    CREATE TABLE IF NOT EXISTS decisions (
+                        id BIGSERIAL PRIMARY KEY,
+                        run_id BIGINT REFERENCES application_runs(id) ON DELETE CASCADE,
+                        decided_by TEXT NOT NULL,  -- 'ai' or 'staff:<discord_id>'
+                        decision TEXT NOT NULL,    -- accept|reject
+                        reason TEXT,
+                        created_at TIMESTAMPTZ DEFAULT now()
+                    );
+                ''')
+
+                # Seed/refresh "questions" ordering to match APPLICATION_QUESTIONS
+                for idx, q in enumerate(APPLICATION_QUESTIONS):
+                    await connection.execute(
+                        """
+                        INSERT INTO questions (code, prompt, type, order_index)
+                        VALUES ($1, $2, $3, $4)
+                        ON CONFLICT (code) DO UPDATE SET prompt = EXCLUDED.prompt, type = EXCLUDED.type, order_index = EXCLUDED.order_index
+                        """,
+                        q["code"], q["prompt"], q["type"], idx
+                    )
+
+            print("[DB] Tables ready.")
+
+            if not self.web_runner:
+                app = web.Application()
+                app.router.add_get('/health', lambda _: web.Response(text='ok', status=200))
+                app.router.add_post('/roblox', self.roblox_handler)
+                self.web_runner = web.AppRunner(app)
+                await self.web_runner.setup()
+                self.web_site = web.TCPSite(self.web_runner, '0.0.0.0', 8080)
+                await self.web_site.start()
+                print("[Web] Server up on :8080 (GET /health, POST /roblox).")
+
+            # Sync slash commands once
+            try:
+                synced = await self.tree.sync()
+                print(f"[Slash] Synced {len(synced)} command(s)")
+            except Exception as e:
+                print(f"[Slash] Sync failed: {e}")
+
+            self._bootstrap_complete = True
+
+    async def resolve_member_rank(self, member: discord.Member) -> str:
+        stored_rank: str | None = None
+        if self.db_pool:
+            try:
+                async with self.db_pool.acquire() as conn:
+                    stored_rank = await conn.fetchval("SELECT rank FROM member_ranks WHERE discord_id=$1", member.id)
+            except Exception as e:
+                print(f"[WARN] Failed to fetch stored rank for {member.id}: {e}")
+        if stored_rank:
+            return stored_rank
+        roles = [role for role in member.roles if not getattr(role, "is_default", lambda: role.id == member.guild.id)()]
+        if not roles:
+            roles = [role for role in member.roles if role.id != member.guild.id]
+        if roles:
+            roles.sort(key=lambda r: r.position, reverse=True)
+            return roles[0].name
+        return "Member"
+
+    async def on_message(self, message: discord.Message):
+        if message.author.bot:
+            return
+
+        await self.ensure_bootstrap()
+
+        channel_id: int | None = None
+        if isinstance(message.channel, discord.Thread):
+            channel_id = message.channel.parent_id
+        elif isinstance(message.channel, discord.abc.GuildChannel):
+            channel_id = message.channel.id
+
+        if GUIDELINES_CHANNEL_ID and channel_id == GUIDELINES_CHANNEL_ID:
+            content = message.content.strip()
+            lower = content.lower()
+            if content and looks_like_question(content) and not is_probably_troll(content):
+                if any(keyword in lower for keyword in QUESTION_KEYWORDS):
+                    if self.guidelines.loaded:
+                        rank_name = await self.resolve_member_rank(message.author)
+                        context = self.guidelines.build_context(content)
+                        try:
+                            reply = await self.ai.answer_guidelines(content, rank_name, context)
+                        except Exception as exc:
+                            print(f"[WARN] Failed to answer guidelines question: {exc}")
+                            reply = (
+                                "I’m having trouble accessing the guidelines right now. "
+                                "Please double-check the handbook or reach out to MD management for help."
+                            )
+                        if reply:
+                            try:
+                                await message.channel.send(reply, reference=message)
+                                await log_action(
+                                    "Guidelines Q&A",
+                                    f"Question by {message.author.mention}:\n{escape_markdown(content)}",
+                                )
+                            except Exception as send_exc:
+                                print(f"[WARN] Could not send guidelines reply: {send_exc}")
+                    else:
+                        print("[WARN] Guidelines requested but store is not loaded.")
+
+        await super().on_message(message)
 
     # --- Roblox webhook with activity embeds ---
     async def roblox_handler(self, request):
