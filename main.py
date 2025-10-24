@@ -2,6 +2,7 @@
 # NOTE: Paste this as the top of your main.py. I will send Parts 2 and 3 after you reply "next".
 
 import discord
+import discord.abc
 from discord.ext import commands, tasks
 import os
 from dotenv import load_dotenv
@@ -13,6 +14,7 @@ from discord import app_commands
 import asyncio
 from urllib.parse import urlparse
 import json
+import re
 from typing import Optional, Any
 from discord.utils import escape_markdown
 
@@ -40,6 +42,7 @@ COMMAND_LOG_CHANNEL_ID       = getenv_int("COMMAND_LOG_CHANNEL_ID", 141696569623
 ACTIVITY_LOG_CHANNEL_ID      = getenv_int("ACTIVITY_LOG_CHANNEL_ID", 1409646416829354095)
 COMMS_CHANNEL_ID             = getenv_int("COMMS_CHANNEL_ID")
 APPLICATION_MANAGEMENT_CHANNEL_ID = 1405988167982649436
+GUIDELINES_CHANNEL_ID        = getenv_int("GUIDELINES_CHANNEL_ID")
 
 # Extra roles to grant on successful application
 APPLICATION_EXTRA_ROLE_IDS = [
@@ -55,6 +58,7 @@ API_SECRET_KEY = os.getenv("API_SECRET_KEY")  # for /roblox webhook auth
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")  # use OpenAI-compatible endpoint
 AI_MODEL       = os.getenv("AI_MODEL", "gpt-4o-mini")
 AI_BASE_URL    = os.getenv("AI_BASE_URL", "https://api.openai.com/v1")
+GUIDELINES_FILE = os.getenv("GUIDELINES_FILE", "resources/guidelines.json")
 
 def _normalize_base(url: str | None) -> str | None:
     if not url:
@@ -196,6 +200,188 @@ def smart_chunk(text, size=4000):
         text = text[split_index:].lstrip()
     chunks.append(text)
     return chunks
+
+
+QUESTION_KEYWORDS = {
+    "activity",
+    "quota",
+    "requirement",
+    "requirements",
+    "loa",
+    "leave",
+    "absence",
+    "orientation",
+    "checkup",
+    "check-up",
+    "clinic",
+    "patient",
+    "procedure",
+    "surgery",
+    "training",
+    "rank",
+    "medical",
+    "department",
+    "md",
+    "duty",
+    "shift",
+    "log",
+    "report",
+    "guideline",
+    "conduct",
+    "evaluation",
+    "promotion",
+    "demotion",
+    "weekly",
+    "expectation",
+    "expectations",
+}
+
+TROLL_KEYWORDS = {
+    "kys",
+    "kill yourself",
+    "suicide",
+    "sex",
+    "porn",
+    "nsfw",
+    "idiot",
+    "dumb",
+    "stupid",
+    "troll",
+}
+
+
+def looks_like_question(text: str) -> bool:
+    lower = text.lower()
+    if "?" in text:
+        return True
+    question_words = {
+        "who",
+        "what",
+        "when",
+        "where",
+        "why",
+        "how",
+        "can",
+        "does",
+        "do",
+        "should",
+        "is",
+        "are",
+        "will",
+        "could",
+        "would",
+        "may",
+    }
+    tokens = set(re.findall(r"[a-zA-Z]+", lower))
+    return bool(tokens & question_words)
+
+
+def is_probably_troll(text: str) -> bool:
+    lower = text.lower()
+    if len(lower) < 8:
+        return True
+    if sum(ch.isalpha() for ch in lower) < 4:
+        return True
+    return any(keyword in lower for keyword in TROLL_KEYWORDS)
+
+
+class GuidelineStore:
+    def __init__(self, path: str):
+        self.path = path
+        self.raw_text: str = ""
+        self.sections: list[dict[str, str]] = []
+        self.section_tokens: list[set[str]] = []
+        self.default_context: str = ""
+        self.loaded: bool = False
+        self._load()
+
+    def _load(self) -> None:
+        try:
+            with open(self.path, "r", encoding="utf-8") as handle:
+                data = handle.read()
+        except FileNotFoundError:
+            print(f"[WARN] Guidelines file missing: {self.path}")
+            return
+
+        self.raw_text = data
+        parsed_sections: list[dict[str, str]] = []
+        try:
+            loaded = json.loads(data)
+        except json.JSONDecodeError:
+            loaded = None
+
+        if isinstance(loaded, dict):
+            for key, value in loaded.items():
+                text = ""
+                if isinstance(value, str):
+                    text = value.strip()
+                elif isinstance(value, (list, dict)):
+                    text = json.dumps(value, ensure_ascii=False, indent=2)
+                if text:
+                    parsed_sections.append({"title": str(key), "text": text})
+        elif isinstance(loaded, list):
+            for entry in loaded:
+                if isinstance(entry, dict):
+                    title = str(entry.get("title") or entry.get("name") or "Section")
+                    text = entry.get("text") or entry.get("content")
+                    if isinstance(text, str) and text.strip():
+                        parsed_sections.append({"title": title, "text": text.strip()})
+
+        if not parsed_sections:
+            # Treat as raw plaintext/markdown; split on blank lines
+            for block in self.raw_text.split("\n\n"):
+                section_text = block.strip()
+                if not section_text:
+                    continue
+                title_line = section_text.splitlines()[0].strip()
+                parsed_sections.append({"title": title_line, "text": section_text})
+
+        self.sections = parsed_sections
+        self.section_tokens = []
+        for section in self.sections:
+            tokens = set(re.findall(r"[a-zA-Z]{3,}", f"{section['title']}\n{section['text']}".lower()))
+            self.section_tokens.append(tokens)
+
+        default_parts: list[str] = []
+        total = 0
+        for section in self.sections[:5]:
+            text = section["text"].strip()
+            if not text:
+                continue
+            default_parts.append(text)
+            total += len(text)
+            if total > 2500:
+                break
+        self.default_context = "\n\n".join(default_parts)[:3000]
+        self.loaded = bool(self.sections)
+
+    def build_context(self, question: str, max_sections: int = 4, limit_chars: int = 2800) -> str:
+        if not self.loaded:
+            return ""
+        tokens = set(re.findall(r"[a-zA-Z]{3,}", question.lower()))
+        scored: list[tuple[int, int]] = []
+        for idx, section_tokens in enumerate(self.section_tokens):
+            score = len(tokens & section_tokens)
+            if score:
+                scored.append((score, idx))
+        scored.sort(key=lambda item: (-item[0], item[1]))
+
+        parts: list[str] = []
+        total_chars = 0
+        for _, idx in scored[:max_sections]:
+            text = self.sections[idx]["text"].strip()
+            if not text:
+                continue
+            if parts and total_chars + len(text) > limit_chars:
+                continue
+            parts.append(text)
+            total_chars += len(text)
+
+        if not parts:
+            return self.default_context
+        combined = "\n\n".join(parts)
+        return combined[:limit_chars]
+
 
 async def send_long_embed(target, title, description, color, footer_text, author_name=None, author_icon_url=None, image_url=None):
     chunks = smart_chunk(description)
@@ -441,6 +627,44 @@ class SimpleOpenAI:
         self.api_key = api_key
         self.base_url = base_url.rstrip("/")
 
+    async def answer_guidelines(self, question: str, role_name: str, context: str) -> str:
+        if not self.api_key:
+            raise RuntimeError("Missing OPENAI_API_KEY for guidelines support.")
+        system_prompt = (
+            "You are Dr. Rae, a friendly yet professional assistant for the SCPF Medical Department. "
+            "Use the provided guideline excerpts to answer member questions conversationally. "
+            "Do not quote large passages verbatim; instead, paraphrase and give clear action steps. "
+            "Always remind members to follow official procedures if unsure and keep responses respectful."
+        )
+        user_message = (
+            f"Member rank: {role_name or 'Unknown'}\n"
+            "Relevant guideline excerpts:\n"
+            f"{context or 'No context available.'}\n\n"
+            f"Question: {question}\n\n"
+            "Reply with a concise, encouraging explanation and include any key reminders the member should know."
+        )
+        payload = {
+            "model": AI_MODEL,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_message},
+            ],
+            "temperature": 0.5,
+            "max_tokens": 450,
+        }
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+        }
+        url = f"{self.base_url}/chat/completions"
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, headers=headers, json=payload, timeout=60) as resp:
+                txt = await resp.text()
+                if resp.status // 100 != 2:
+                    raise RuntimeError(f"AI guidelines answer failed {resp.status}: {txt}")
+                data = json.loads(txt)
+                return data["choices"][0]["message"]["content"].strip()
+
     async def score_application(self, answers: dict[str, str]) -> dict:
         """
         Call Chat Completions with a strict JSON schema for:
@@ -509,6 +733,7 @@ class MD_BOT(commands.Bot):
         super().__init__(command_prefix='!', intents=intents)
         self.db_pool: Optional[asyncpg.Pool] = None
         self.ai = SimpleOpenAI(OPENAI_API_KEY or "", AI_BASE_URL)
+        self.guidelines = GuidelineStore(GUIDELINES_FILE)
 
     async def setup_hook(self):
         # DB pool
@@ -520,6 +745,62 @@ class MD_BOT(commands.Bot):
         except Exception as e:
             print(f"[DB] FAILED: {e}")
             return
+
+    async def resolve_member_rank(self, member: discord.Member) -> str:
+        stored_rank: str | None = None
+        if self.db_pool:
+            try:
+                async with self.db_pool.acquire() as conn:
+                    stored_rank = await conn.fetchval("SELECT rank FROM member_ranks WHERE discord_id=$1", member.id)
+            except Exception as e:
+                print(f"[WARN] Failed to fetch stored rank for {member.id}: {e}")
+        if stored_rank:
+            return stored_rank
+        roles = [role for role in member.roles if not getattr(role, "is_default", lambda: role.id == member.guild.id)()]
+        if not roles:
+            roles = [role for role in member.roles if role.id != member.guild.id]
+        if roles:
+            roles.sort(key=lambda r: r.position, reverse=True)
+            return roles[0].name
+        return "Member"
+
+    async def on_message(self, message: discord.Message):
+        if message.author.bot:
+            return
+
+        if (
+            GUIDELINES_CHANNEL_ID
+            and isinstance(message.channel, (discord.abc.GuildChannel, discord.Thread))
+            and message.channel.id == GUIDELINES_CHANNEL_ID
+        ):
+            content = message.content.strip()
+            lower = content.lower()
+            if content and looks_like_question(content) and not is_probably_troll(content):
+                if any(keyword in lower for keyword in QUESTION_KEYWORDS):
+                    if self.guidelines.loaded:
+                        rank_name = await self.resolve_member_rank(message.author)
+                        context = self.guidelines.build_context(content)
+                        try:
+                            reply = await self.ai.answer_guidelines(content, rank_name, context)
+                        except Exception as exc:
+                            print(f"[WARN] Failed to answer guidelines question: {exc}")
+                            reply = (
+                                "I’m having trouble accessing the guidelines right now. "
+                                "Please double-check the handbook or reach out to MD management for help."
+                            )
+                        if reply:
+                            try:
+                                await message.channel.send(reply, reference=message)
+                                await log_action(
+                                    "Guidelines Q&A",
+                                    f"Question by {message.author.mention}:\n{escape_markdown(content)}",
+                                )
+                            except Exception as send_exc:
+                                print(f"[WARN] Could not send guidelines reply: {send_exc}")
+                    else:
+                        print("[WARN] Guidelines requested but store is not loaded.")
+
+        await super().on_message(message)
 
         # Schema (create/ensure)
         async with self.db_pool.acquire() as connection:
