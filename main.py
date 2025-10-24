@@ -686,7 +686,12 @@ class SimpleOpenAI:
             raise RuntimeError("Missing OPENAI_API_KEY for guidelines support.")
         system_prompt = (
             "You are Dr. Rae, a friendly yet professional assistant for the SCPF Medical Department. "
-            "Use the provided guideline excerpts to answer member questions conversationally. "
+            "Rely exclusively on the provided guideline excerpts and any saved member background; treat them as your full "
+            "knowledge base. "
+            "If the excerpts do not contain the requested information, state that you are unsure and invite the member to "
+            "check the handbook or provide more details via the `/guidelines context` command. "
+            "Do not invent or reference real-world medical practices, Roblox platform rules, or anything outside the "
+            "handbook. "
             "Do not quote large passages verbatim; instead, paraphrase and give clear action steps. "
             "Always remind members to follow official procedures if unsure and keep responses respectful. "
             f"Whenever a question touches on quota or activity expectations, spell out the standard requirement of "
@@ -702,6 +707,8 @@ class SimpleOpenAI:
             f"Question: {question}\n\n"
             "Reply with a concise, encouraging explanation and include any key reminders the member should know. "
             "State the exact numbers, deadlines, or channels/forms involved instead of saying 'standard' or 'usual'. "
+            "If an answer would require information that is not in the excerpts, say you are not sure and ask for more "
+            "details or suggest reviewing the handbook section directly. "
             "If the member is asking how to carry out something, outline the steps in order so they can follow them."
         )
         payload = {
