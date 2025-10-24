@@ -422,14 +422,30 @@ class GuidelineStore:
 
         parts: list[str] = []
         total_chars = 0
+
+        def add_text(raw: str) -> None:
+            nonlocal total_chars
+            text = raw.strip()
+            if not text or total_chars >= limit_chars:
+                return
+            remaining = limit_chars - total_chars
+            snippet = text if len(text) <= remaining else text[:remaining]
+            if not snippet:
+                return
+            parts.append(snippet)
+            total_chars += len(snippet)
+
+        # Always include a portion of the default handbook context so answers stay grounded.
+        if self.default_context:
+            base_limit = min(len(self.default_context), max(1, limit_chars // 2))
+            add_text(self.default_context[:base_limit])
+
+        seen: set[int] = set()
         for _, idx in scored[:max_sections]:
-            text = self.sections[idx]["text"].strip()
-            if not text:
+            if idx in seen:
                 continue
-            if parts and total_chars + len(text) > limit_chars:
-                continue
-            parts.append(text)
-            total_chars += len(text)
+            seen.add(idx)
+            add_text(self.sections[idx]["text"])
 
         if not parts:
             return self.default_context
@@ -709,6 +725,7 @@ class SimpleOpenAI:
             "State the exact numbers, deadlines, or channels/forms involved instead of saying 'standard' or 'usual'. "
             "If an answer would require information that is not in the excerpts, say you are not sure and ask for more "
             "details or suggest reviewing the handbook section directly. "
+            "Be very direct: lead with the core answer or required action before expanding with supporting details. "
             "If the member is asking how to carry out something, outline the steps in order so they can follow them."
         )
         payload = {
