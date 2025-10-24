@@ -61,6 +61,16 @@ AI_MODEL       = os.getenv("AI_MODEL", "gpt-4o-mini")
 AI_BASE_URL    = os.getenv("AI_BASE_URL", "https://api.openai.com/v1")
 GUIDELINES_FILE = os.getenv("GUIDELINES_FILE", "resources/guidelines.json")
 
+# Tokens that should be expanded with extra context-specific synonyms when
+# members use shorthand in their questions.
+GUIDELINE_TOKEN_HINTS: dict[str, set[str]] = {
+    # Common shorthand -> related handbook terms
+    "cart": {"cure", "curecart", "cure-cart"},
+    "cure cart": {"cure", "cart"},
+    "curecart": {"cure", "cart"},
+    "loa": {"leave", "absence"},
+}
+
 def _normalize_base(url: str | None) -> str | None:
     if not url:
         return None
@@ -412,7 +422,14 @@ class GuidelineStore:
     def build_context(self, question: str, max_sections: int = 4, limit_chars: int = 2800) -> str:
         if not self.loaded:
             return ""
-        tokens = set(re.findall(r"[a-zA-Z]{3,}", question.lower()))
+        question_lower = question.lower()
+        tokens = set(re.findall(r"[a-zA-Z]{3,}", question_lower))
+        expanded_tokens = set(tokens)
+        for key, extras in GUIDELINE_TOKEN_HINTS.items():
+            if key in tokens or key in question_lower:
+                for extra in extras:
+                    expanded_tokens.update(re.findall(r"[a-zA-Z]{3,}", extra.lower()))
+        tokens = expanded_tokens
         scored: list[tuple[int, int]] = []
         for idx, section_tokens in enumerate(self.section_tokens):
             score = len(tokens & section_tokens)
@@ -709,6 +726,8 @@ class SimpleOpenAI:
             "Do not invent or reference real-world medical practices, Roblox platform rules, or anything outside the "
             "handbook. "
             "Do not quote large passages verbatim; instead, paraphrase and give clear action steps. "
+            "Interpret shorthand, acronyms, or vague phrasing using the closest matching concept in the provided excerpts—"
+            "for example, if a member mentions 'the cart', treat it as the Cure Cart whenever that appears in the handbook. "
             "Always remind members to follow official procedures if unsure and keep responses respectful. "
             f"Whenever a question touches on quota or activity expectations, spell out the standard requirement of "
             f"{WEEKLY_REQUIREMENT} logged services and {WEEKLY_TIME_REQUIREMENT} minutes on-site, and note that missing "
@@ -723,6 +742,7 @@ class SimpleOpenAI:
             f"Question: {question}\n\n"
             "Reply with a concise, encouraging explanation and include any key reminders the member should know. "
             "State the exact numbers, deadlines, or channels/forms involved instead of saying 'standard' or 'usual'. "
+            "Use only the facts that appear in the excerpts or saved context, even when interpreting shorthand. "
             "If an answer would require information that is not in the excerpts, say you are not sure and ask for more "
             "details or suggest reviewing the handbook section directly. "
             "Be very direct: lead with the core answer or required action before expanding with supporting details. "
