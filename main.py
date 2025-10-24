@@ -2,6 +2,7 @@
 # NOTE: Paste this as the top of your main.py. I will send Parts 2 and 3 after you reply "next".
 
 import discord
+import discord.abc
 from discord.ext import commands, tasks
 import os
 from dotenv import load_dotenv
@@ -13,6 +14,7 @@ from discord import app_commands
 import asyncio
 from urllib.parse import urlparse
 import json
+import re
 from typing import Optional, Any
 from discord.utils import escape_markdown
 
@@ -40,6 +42,7 @@ COMMAND_LOG_CHANNEL_ID       = getenv_int("COMMAND_LOG_CHANNEL_ID", 141696569623
 ACTIVITY_LOG_CHANNEL_ID      = getenv_int("ACTIVITY_LOG_CHANNEL_ID", 1409646416829354095)
 COMMS_CHANNEL_ID             = getenv_int("COMMS_CHANNEL_ID")
 APPLICATION_MANAGEMENT_CHANNEL_ID = 1405988167982649436
+GUIDELINES_CHANNEL_ID        = getenv_int("GUIDELINES_CHANNEL_ID")
 
 # Extra roles to grant on successful application
 APPLICATION_EXTRA_ROLE_IDS = [
@@ -55,6 +58,7 @@ API_SECRET_KEY = os.getenv("API_SECRET_KEY")  # for /roblox webhook auth
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")  # use OpenAI-compatible endpoint
 AI_MODEL       = os.getenv("AI_MODEL", "gpt-4o-mini")
 AI_BASE_URL    = os.getenv("AI_BASE_URL", "https://api.openai.com/v1")
+GUIDELINES_FILE = os.getenv("GUIDELINES_FILE", "resources/guidelines.json")
 
 def _normalize_base(url: str | None) -> str | None:
     if not url:
@@ -196,6 +200,184 @@ def smart_chunk(text, size=4000):
         text = text[split_index:].lstrip()
     chunks.append(text)
     return chunks
+
+
+QUESTION_KEYWORDS = {
+    "activity",
+    "quota",
+    "requirement",
+    "requirements",
+    "loa",
+    "leave",
+    "absence",
+    "orientation",
+    "checkup",
+    "check-up",
+    "clinic",
+    "patient",
+    "procedure",
+    "surgery",
+    "training",
+    "rank",
+    "medical",
+    "department",
+    "md",
+    "duty",
+    "shift",
+    "log",
+    "report",
+    "guideline",
+    "conduct",
+    "evaluation",
+    "promotion",
+    "demotion",
+    "weekly",
+    "expectation",
+    "expectations",
+}
+
+TROLL_KEYWORDS = {
+    "kys",
+    "kill yourself",
+    "suicide",
+    "sex",
+    "porn",
+    "nsfw",
+    "idiot",
+    "dumb",
+    "stupid",
+    "troll",
+}
+
+
+def looks_like_question(text: str) -> bool:
+    lower = text.lower()
+    if "?" in text:
+        return True
+    question_words = {
+        "who",
+        "what",
+        "when",
+        "where",
+        "why",
+        "how",
+        "can",
+        "does",
+        "do",
+        "should",
+        "is",
+        "are",
+        "will",
+        "could",
+        "would",
+        "may",
+    }
+    tokens = set(re.findall(r"[a-zA-Z]+", lower))
+    return bool(tokens & question_words)
+
+
+def is_probably_troll(text: str) -> bool:
+    lower = text.lower()
+    return any(keyword in lower for keyword in TROLL_KEYWORDS)
+
+
+class GuidelineStore:
+    def __init__(self, path: str):
+        self.path = path
+        self.raw_text: str = ""
+        self.sections: list[dict[str, str]] = []
+        self.section_tokens: list[set[str]] = []
+        self.default_context: str = ""
+        self.loaded: bool = False
+        self._load()
+
+    def _load(self) -> None:
+        try:
+            with open(self.path, "r", encoding="utf-8") as handle:
+                data = handle.read()
+        except FileNotFoundError:
+            print(f"[WARN] Guidelines file missing: {self.path}")
+            return
+
+        self.raw_text = data
+        parsed_sections: list[dict[str, str]] = []
+        try:
+            loaded = json.loads(data)
+        except json.JSONDecodeError:
+            loaded = None
+
+        if isinstance(loaded, dict):
+            for key, value in loaded.items():
+                text = ""
+                if isinstance(value, str):
+                    text = value.strip()
+                elif isinstance(value, (list, dict)):
+                    text = json.dumps(value, ensure_ascii=False, indent=2)
+                if text:
+                    parsed_sections.append({"title": str(key), "text": text})
+        elif isinstance(loaded, list):
+            for entry in loaded:
+                if isinstance(entry, dict):
+                    title = str(entry.get("title") or entry.get("name") or "Section")
+                    text = entry.get("text") or entry.get("content")
+                    if isinstance(text, str) and text.strip():
+                        parsed_sections.append({"title": title, "text": text.strip()})
+
+        if not parsed_sections:
+            # Treat as raw plaintext/markdown; split on blank lines
+            for block in self.raw_text.split("\n\n"):
+                section_text = block.strip()
+                if not section_text:
+                    continue
+                title_line = section_text.splitlines()[0].strip()
+                parsed_sections.append({"title": title_line, "text": section_text})
+
+        self.sections = parsed_sections
+        self.section_tokens = []
+        for section in self.sections:
+            tokens = set(re.findall(r"[a-zA-Z]{3,}", f"{section['title']}\n{section['text']}".lower()))
+            self.section_tokens.append(tokens)
+
+        default_parts: list[str] = []
+        total = 0
+        for section in self.sections[:5]:
+            text = section["text"].strip()
+            if not text:
+                continue
+            default_parts.append(text)
+            total += len(text)
+            if total > 2500:
+                break
+        self.default_context = "\n\n".join(default_parts)[:3000]
+        self.loaded = bool(self.sections)
+
+    def build_context(self, question: str, max_sections: int = 4, limit_chars: int = 2800) -> str:
+        if not self.loaded:
+            return ""
+        tokens = set(re.findall(r"[a-zA-Z]{3,}", question.lower()))
+        scored: list[tuple[int, int]] = []
+        for idx, section_tokens in enumerate(self.section_tokens):
+            score = len(tokens & section_tokens)
+            if score:
+                scored.append((score, idx))
+        scored.sort(key=lambda item: (-item[0], item[1]))
+
+        parts: list[str] = []
+        total_chars = 0
+        for _, idx in scored[:max_sections]:
+            text = self.sections[idx]["text"].strip()
+            if not text:
+                continue
+            if parts and total_chars + len(text) > limit_chars:
+                continue
+            parts.append(text)
+            total_chars += len(text)
+
+        if not parts:
+            return self.default_context
+        combined = "\n\n".join(parts)
+        return combined[:limit_chars]
+
 
 async def send_long_embed(target, title, description, color, footer_text, author_name=None, author_icon_url=None, image_url=None):
     chunks = smart_chunk(description)
@@ -441,6 +623,44 @@ class SimpleOpenAI:
         self.api_key = api_key
         self.base_url = base_url.rstrip("/")
 
+    async def answer_guidelines(self, question: str, role_name: str, context: str) -> str:
+        if not self.api_key:
+            raise RuntimeError("Missing OPENAI_API_KEY for guidelines support.")
+        system_prompt = (
+            "You are Dr. Rae, a friendly yet professional assistant for the SCPF Medical Department. "
+            "Use the provided guideline excerpts to answer member questions conversationally. "
+            "Do not quote large passages verbatim; instead, paraphrase and give clear action steps. "
+            "Always remind members to follow official procedures if unsure and keep responses respectful."
+        )
+        user_message = (
+            f"Member rank: {role_name or 'Unknown'}\n"
+            "Relevant guideline excerpts:\n"
+            f"{context or 'No context available.'}\n\n"
+            f"Question: {question}\n\n"
+            "Reply with a concise, encouraging explanation and include any key reminders the member should know."
+        )
+        payload = {
+            "model": AI_MODEL,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_message},
+            ],
+            "temperature": 0.5,
+            "max_tokens": 450,
+        }
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+        }
+        url = f"{self.base_url}/chat/completions"
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, headers=headers, json=payload, timeout=60) as resp:
+                txt = await resp.text()
+                if resp.status // 100 != 2:
+                    raise RuntimeError(f"AI guidelines answer failed {resp.status}: {txt}")
+                data = json.loads(txt)
+                return data["choices"][0]["message"]["content"].strip()
+
     async def score_application(self, answers: dict[str, str]) -> dict:
         """
         Call Chat Completions with a strict JSON schema for:
@@ -509,6 +729,11 @@ class MD_BOT(commands.Bot):
         super().__init__(command_prefix='!', intents=intents)
         self.db_pool: Optional[asyncpg.Pool] = None
         self.ai = SimpleOpenAI(OPENAI_API_KEY or "", AI_BASE_URL)
+        self.guidelines = GuidelineStore(GUIDELINES_FILE)
+        self._bootstrap_complete = False
+        self.web_runner: web.AppRunner | None = None
+        self.web_site: web.BaseSite | None = None
+        self._bootstrap_lock = asyncio.Lock()
 
     async def setup_hook(self):
         # DB pool
@@ -521,208 +746,277 @@ class MD_BOT(commands.Bot):
             print(f"[DB] FAILED: {e}")
             return
 
-        # Schema (create/ensure)
-        async with self.db_pool.acquire() as connection:
-            # Existing tables
-            await connection.execute('''
-                CREATE TABLE IF NOT EXISTS weekly_tasks (
-                    member_id BIGINT PRIMARY KEY,
-                    tasks_completed INT DEFAULT 0
-                );
-            ''')
-            await connection.execute('''
-                CREATE TABLE IF NOT EXISTS task_logs (
-                    log_id SERIAL PRIMARY KEY,
-                    member_id BIGINT,
-                    task TEXT,
-                    task_type TEXT,
-                    proof_url TEXT,
-                    comments TEXT,
-                    timestamp TIMESTAMPTZ
-                );
-            ''')
-            await connection.execute('''
-                CREATE TABLE IF NOT EXISTS weekly_task_logs (
-                    log_id SERIAL PRIMARY KEY,
-                    member_id BIGINT,
-                    task TEXT,
-                    task_type TEXT,
-                    proof_url TEXT,
-                    comments TEXT,
-                    timestamp TIMESTAMPTZ
-                );
-            ''')
-            await connection.execute('''
-                CREATE TABLE IF NOT EXISTS roblox_verification (
-                    discord_id BIGINT PRIMARY KEY,
-                    roblox_id BIGINT UNIQUE
-                );
-            ''')
-            await connection.execute('''
-                CREATE TABLE IF NOT EXISTS roblox_time (
-                    member_id BIGINT PRIMARY KEY,
-                    time_spent INT DEFAULT 0
-                );
-            ''')
-            await connection.execute('''
-                CREATE TABLE IF NOT EXISTS roblox_sessions (
-                    roblox_id BIGINT PRIMARY KEY,
-                    start_time TIMESTAMPTZ
-                );
-            ''')
-            await connection.execute('''
-                CREATE TABLE IF NOT EXISTS orientations (
-                    discord_id BIGINT PRIMARY KEY,
-                    assigned_at TIMESTAMPTZ,
-                    deadline TIMESTAMPTZ,
-                    passed BOOLEAN DEFAULT FALSE,
-                    passed_at TIMESTAMPTZ,
-                    warned_5d BOOLEAN DEFAULT FALSE,
-                    expired_handled BOOLEAN DEFAULT FALSE
-                );
-            ''')
-            await connection.execute('''
-                CREATE TABLE IF NOT EXISTS strikes (
-                    strike_id SERIAL PRIMARY KEY,
-                    member_id BIGINT NOT NULL,
-                    reason TEXT,
-                    issued_at TIMESTAMPTZ NOT NULL,
-                    expires_at TIMESTAMPTZ NOT NULL,
-                    set_by BIGINT,
-                    auto BOOLEAN DEFAULT FALSE
-                );
-            ''')
+    async def ensure_bootstrap(self) -> None:
+        if self._bootstrap_complete or not self.db_pool:
+            return
 
-            # Safety ALTERs for legacy DBs
-            await connection.execute("ALTER TABLE weekly_task_logs ADD COLUMN IF NOT EXISTS task TEXT;")
-            await connection.execute("ALTER TABLE task_logs ADD COLUMN IF NOT EXISTS task TEXT;")
-            await connection.execute("UPDATE weekly_task_logs SET task = COALESCE(task, task_type) WHERE task IS NULL;")
-            await connection.execute("UPDATE task_logs SET task = COALESCE(task, task_type) WHERE task IS NULL;")
-            await connection.execute("ALTER TABLE orientations ADD COLUMN IF NOT EXISTS passed_at TIMESTAMPTZ;")
-            await connection.execute("ALTER TABLE orientations ADD COLUMN IF NOT EXISTS warned_5d BOOLEAN DEFAULT FALSE;")
-            await connection.execute("ALTER TABLE orientations ADD COLUMN IF NOT EXISTS expired_handled BOOLEAN DEFAULT FALSE;")
-            await connection.execute("ALTER TABLE strikes ADD COLUMN IF NOT EXISTS set_by BIGINT;")
-            await connection.execute("ALTER TABLE strikes ADD COLUMN IF NOT EXISTS auto BOOLEAN DEFAULT FALSE;")
+        async with self._bootstrap_lock:
+            if self._bootstrap_complete or not self.db_pool:
+                return
 
-            await connection.execute('''
-                CREATE TABLE IF NOT EXISTS member_ranks (
-                    discord_id BIGINT PRIMARY KEY,
-                    rank TEXT,
-                    set_by BIGINT,
-                    set_at TIMESTAMPTZ
-                );
-            ''')
-            await connection.execute('''
-                CREATE TABLE IF NOT EXISTS activity_excuses (
-                    week_key TEXT PRIMARY KEY,
-                    reason TEXT,
-                    set_by BIGINT,
-                    set_at TIMESTAMPTZ
-                );
-            ''')
-            await connection.execute('''
-                CREATE TABLE IF NOT EXISTS member_activity_excuses (
-                    member_id BIGINT PRIMARY KEY,
-                    reason TEXT,
-                    set_by BIGINT,
-                    set_at TIMESTAMPTZ,
-                    expires_at TIMESTAMPTZ
-                );
-            ''')
+            async with self.db_pool.acquire() as connection:
+                # Existing tables
+                await connection.execute('''
+                    CREATE TABLE IF NOT EXISTS weekly_tasks (
+                        member_id BIGINT PRIMARY KEY,
+                        tasks_completed INT DEFAULT 0
+                    );
+                ''')
+                await connection.execute('''
+                    CREATE TABLE IF NOT EXISTS task_logs (
+                        log_id SERIAL PRIMARY KEY,
+                        member_id BIGINT,
+                        task TEXT,
+                        task_type TEXT,
+                        proof_url TEXT,
+                        comments TEXT,
+                        timestamp TIMESTAMPTZ
+                    );
+                ''')
+                await connection.execute('''
+                    CREATE TABLE IF NOT EXISTS weekly_task_logs (
+                        log_id SERIAL PRIMARY KEY,
+                        member_id BIGINT,
+                        task TEXT,
+                        task_type TEXT,
+                        proof_url TEXT,
+                        comments TEXT,
+                        timestamp TIMESTAMPTZ
+                    );
+                ''')
+                await connection.execute('''
+                    CREATE TABLE IF NOT EXISTS roblox_verification (
+                        discord_id BIGINT PRIMARY KEY,
+                        roblox_id BIGINT UNIQUE
+                    );
+                ''')
+                await connection.execute('''
+                    CREATE TABLE IF NOT EXISTS roblox_time (
+                        member_id BIGINT PRIMARY KEY,
+                        time_spent INT DEFAULT 0
+                    );
+                ''')
+                await connection.execute('''
+                    CREATE TABLE IF NOT EXISTS roblox_sessions (
+                        roblox_id BIGINT PRIMARY KEY,
+                        start_time TIMESTAMPTZ
+                    );
+                ''')
+                await connection.execute('''
+                    CREATE TABLE IF NOT EXISTS orientations (
+                        discord_id BIGINT PRIMARY KEY,
+                        assigned_at TIMESTAMPTZ,
+                        deadline TIMESTAMPTZ,
+                        passed BOOLEAN DEFAULT FALSE,
+                        passed_at TIMESTAMPTZ,
+                        warned_5d BOOLEAN DEFAULT FALSE,
+                        expired_handled BOOLEAN DEFAULT FALSE
+                    );
+                ''')
+                await connection.execute('''
+                    CREATE TABLE IF NOT EXISTS strikes (
+                        strike_id SERIAL PRIMARY KEY,
+                        member_id BIGINT NOT NULL,
+                        reason TEXT,
+                        issued_at TIMESTAMPTZ NOT NULL,
+                        expires_at TIMESTAMPTZ NOT NULL,
+                        set_by BIGINT,
+                        auto BOOLEAN DEFAULT FALSE
+                    );
+                ''')
 
-            # === New: Application system tables ===
-            await connection.execute('''
-                CREATE TABLE IF NOT EXISTS applicants (
-                    id BIGSERIAL PRIMARY KEY,
-                    discord_id BIGINT UNIQUE NOT NULL,
-                    roblox_username TEXT,
-                    roblox_user_id BIGINT,
-                    status TEXT NOT NULL DEFAULT 'in_progress', -- in_progress|submitted|accepted|rejected
-                    created_at TIMESTAMPTZ DEFAULT now(),
-                    updated_at TIMESTAMPTZ DEFAULT now(),
-                    last_active TIMESTAMPTZ DEFAULT now(),
-                    cooldown_until TIMESTAMPTZ
-                );
-            ''')
-            await connection.execute('''
-                CREATE TABLE IF NOT EXISTS application_runs (
-                    id BIGSERIAL PRIMARY KEY,
-                    applicant_id BIGINT REFERENCES applicants(id) ON DELETE CASCADE,
-                    started_at TIMESTAMPTZ DEFAULT now(),
-                    submitted_at TIMESTAMPTZ
-                );
-            ''')
-            await connection.execute('''
-                CREATE TABLE IF NOT EXISTS questions (
-                    id SERIAL PRIMARY KEY,
-                    code TEXT UNIQUE NOT NULL,
-                    prompt TEXT NOT NULL,
-                    type TEXT NOT NULL,
-                    order_index INT NOT NULL
-                );
-            ''')
-            await connection.execute('''
-                CREATE TABLE IF NOT EXISTS answers (
-                    id BIGSERIAL PRIMARY KEY,
-                    run_id BIGINT REFERENCES application_runs(id) ON DELETE CASCADE,
-                    question_code TEXT NOT NULL,
-                    answer_text TEXT,
-                    created_at TIMESTAMPTZ DEFAULT now()
-                );
-            ''')
-            await connection.execute('''
-                CREATE TABLE IF NOT EXISTS ai_reviews (
-                    id BIGSERIAL PRIMARY KEY,
-                    run_id BIGINT REFERENCES application_runs(id) ON DELETE CASCADE,
-                    model TEXT NOT NULL,
-                    score NUMERIC(5,2),
-                    verdict TEXT,
-                    rationale TEXT,
-                    tokens_in INT,
-                    tokens_out INT,
-                    created_at TIMESTAMPTZ DEFAULT now()
-                );
-            ''')
-            await connection.execute('''
-                CREATE TABLE IF NOT EXISTS decisions (
-                    id BIGSERIAL PRIMARY KEY,
-                    run_id BIGINT REFERENCES application_runs(id) ON DELETE CASCADE,
-                    decided_by TEXT NOT NULL,  -- 'ai' or 'staff:<discord_id>'
-                    decision TEXT NOT NULL,    -- accept|reject
-                    reason TEXT,
-                    created_at TIMESTAMPTZ DEFAULT now()
-                );
-            ''')
+                # Safety ALTERs for legacy DBs
+                await connection.execute("ALTER TABLE weekly_task_logs ADD COLUMN IF NOT EXISTS task TEXT;")
+                await connection.execute("ALTER TABLE task_logs ADD COLUMN IF NOT EXISTS task TEXT;")
+                await connection.execute("UPDATE weekly_task_logs SET task = COALESCE(task, task_type) WHERE task IS NULL;")
+                await connection.execute("UPDATE task_logs SET task = COALESCE(task, task_type) WHERE task IS NULL;")
+                await connection.execute("ALTER TABLE orientations ADD COLUMN IF NOT EXISTS passed_at TIMESTAMPTZ;")
+                await connection.execute("ALTER TABLE orientations ADD COLUMN IF NOT EXISTS warned_5d BOOLEAN DEFAULT FALSE;")
+                await connection.execute("ALTER TABLE orientations ADD COLUMN IF NOT EXISTS expired_handled BOOLEAN DEFAULT FALSE;")
+                await connection.execute("ALTER TABLE strikes ADD COLUMN IF NOT EXISTS set_by BIGINT;")
+                await connection.execute("ALTER TABLE strikes ADD COLUMN IF NOT EXISTS auto BOOLEAN DEFAULT FALSE;")
 
-            # Seed/refresh "questions" ordering to match APPLICATION_QUESTIONS
-            for idx, q in enumerate(APPLICATION_QUESTIONS):
-                await connection.execute(
-                    """
-                    INSERT INTO questions (code, prompt, type, order_index)
-                    VALUES ($1, $2, $3, $4)
-                    ON CONFLICT (code) DO UPDATE SET prompt = EXCLUDED.prompt, type = EXCLUDED.type, order_index = EXCLUDED.order_index
-                    """,
-                    q["code"], q["prompt"], q["type"], idx
-                )
+                await connection.execute('''
+                    CREATE TABLE IF NOT EXISTS member_ranks (
+                        discord_id BIGINT PRIMARY KEY,
+                        rank TEXT,
+                        set_by BIGINT,
+                        set_at TIMESTAMPTZ
+                    );
+                ''')
+                await connection.execute('''
+                    CREATE TABLE IF NOT EXISTS activity_excuses (
+                        week_key TEXT PRIMARY KEY,
+                        reason TEXT,
+                        set_by BIGINT,
+                        set_at TIMESTAMPTZ
+                    );
+                ''')
+                await connection.execute('''
+                    CREATE TABLE IF NOT EXISTS member_activity_excuses (
+                        member_id BIGINT PRIMARY KEY,
+                        reason TEXT,
+                        set_by BIGINT,
+                        set_at TIMESTAMPTZ,
+                        expires_at TIMESTAMPTZ
+                    );
+                ''')
 
-        print("[DB] Tables ready.")
+                # === New: Application system tables ===
+                await connection.execute('''
+                    CREATE TABLE IF NOT EXISTS applicants (
+                        id BIGSERIAL PRIMARY KEY,
+                        discord_id BIGINT UNIQUE NOT NULL,
+                        roblox_username TEXT,
+                        roblox_user_id BIGINT,
+                        status TEXT NOT NULL DEFAULT 'in_progress', -- in_progress|submitted|accepted|rejected
+                        created_at TIMESTAMPTZ DEFAULT now(),
+                        updated_at TIMESTAMPTZ DEFAULT now(),
+                        last_active TIMESTAMPTZ DEFAULT now(),
+                        cooldown_until TIMESTAMPTZ
+                    );
+                ''')
+                await connection.execute('''
+                    CREATE TABLE IF NOT EXISTS application_runs (
+                        id BIGSERIAL PRIMARY KEY,
+                        applicant_id BIGINT REFERENCES applicants(id) ON DELETE CASCADE,
+                        started_at TIMESTAMPTZ DEFAULT now(),
+                        submitted_at TIMESTAMPTZ
+                    );
+                ''')
+                await connection.execute('''
+                    CREATE TABLE IF NOT EXISTS questions (
+                        id SERIAL PRIMARY KEY,
+                        code TEXT UNIQUE NOT NULL,
+                        prompt TEXT NOT NULL,
+                        type TEXT NOT NULL,
+                        order_index INT NOT NULL
+                    );
+                ''')
+                await connection.execute('''
+                    CREATE TABLE IF NOT EXISTS answers (
+                        id BIGSERIAL PRIMARY KEY,
+                        run_id BIGINT REFERENCES application_runs(id) ON DELETE CASCADE,
+                        question_code TEXT NOT NULL,
+                        answer_text TEXT,
+                        created_at TIMESTAMPTZ DEFAULT now()
+                    );
+                ''')
+                await connection.execute('''
+                    CREATE TABLE IF NOT EXISTS ai_reviews (
+                        id BIGSERIAL PRIMARY KEY,
+                        run_id BIGINT REFERENCES application_runs(id) ON DELETE CASCADE,
+                        model TEXT NOT NULL,
+                        score NUMERIC(5,2),
+                        verdict TEXT,
+                        rationale TEXT,
+                        tokens_in INT,
+                        tokens_out INT,
+                        created_at TIMESTAMPTZ DEFAULT now()
+                    );
+                ''')
+                await connection.execute('''
+                    CREATE TABLE IF NOT EXISTS decisions (
+                        id BIGSERIAL PRIMARY KEY,
+                        run_id BIGINT REFERENCES application_runs(id) ON DELETE CASCADE,
+                        decided_by TEXT NOT NULL,  -- 'ai' or 'staff:<discord_id>'
+                        decision TEXT NOT NULL,    -- accept|reject
+                        reason TEXT,
+                        created_at TIMESTAMPTZ DEFAULT now()
+                    );
+                ''')
 
-        # Sync slash commands
-        try:
-            synced = await self.tree.sync()
-            print(f"[Slash] Synced {len(synced)} command(s)")
-        except Exception as e:
-            print(f"[Slash] Sync failed: {e}")
+                # Seed/refresh "questions" ordering to match APPLICATION_QUESTIONS
+                for idx, q in enumerate(APPLICATION_QUESTIONS):
+                    await connection.execute(
+                        """
+                        INSERT INTO questions (code, prompt, type, order_index)
+                        VALUES ($1, $2, $3, $4)
+                        ON CONFLICT (code) DO UPDATE SET prompt = EXCLUDED.prompt, type = EXCLUDED.type, order_index = EXCLUDED.order_index
+                        """,
+                        q["code"], q["prompt"], q["type"], idx
+                    )
 
-        # Web server for Roblox integration
-        app = web.Application()
-        app.router.add_get('/health', lambda _: web.Response(text='ok', status=200))
-        app.router.add_post('/roblox', self.roblox_handler)
-        runner = web.AppRunner(app)
-        await runner.setup()
-        site = web.TCPSite(runner, '0.0.0.0', 8080)
-        await site.start()
-        print("[Web] Server up on :8080 (GET /health, POST /roblox).")
+            print("[DB] Tables ready.")
+
+            if not self.web_runner:
+                app = web.Application()
+                app.router.add_get('/health', lambda _: web.Response(text='ok', status=200))
+                app.router.add_post('/roblox', self.roblox_handler)
+                self.web_runner = web.AppRunner(app)
+                await self.web_runner.setup()
+                self.web_site = web.TCPSite(self.web_runner, '0.0.0.0', 8080)
+                await self.web_site.start()
+                print("[Web] Server up on :8080 (GET /health, POST /roblox).")
+
+            # Sync slash commands once
+            try:
+                synced = await self.tree.sync()
+                print(f"[Slash] Synced {len(synced)} command(s)")
+            except Exception as e:
+                print(f"[Slash] Sync failed: {e}")
+
+            self._bootstrap_complete = True
+
+    async def resolve_member_rank(self, member: discord.Member) -> str:
+        stored_rank: str | None = None
+        if self.db_pool:
+            try:
+                async with self.db_pool.acquire() as conn:
+                    stored_rank = await conn.fetchval("SELECT rank FROM member_ranks WHERE discord_id=$1", member.id)
+            except Exception as e:
+                print(f"[WARN] Failed to fetch stored rank for {member.id}: {e}")
+        if stored_rank:
+            return stored_rank
+        roles = [role for role in member.roles if not getattr(role, "is_default", lambda: role.id == member.guild.id)()]
+        if not roles:
+            roles = [role for role in member.roles if role.id != member.guild.id]
+        if roles:
+            roles.sort(key=lambda r: r.position, reverse=True)
+            return roles[0].name
+        return "Member"
+
+    async def on_message(self, message: discord.Message):
+        if message.author.bot:
+            return
+
+        await self.ensure_bootstrap()
+
+        channel_id: int | None = None
+        if isinstance(message.channel, discord.Thread):
+            channel_id = message.channel.parent_id
+        elif isinstance(message.channel, discord.abc.GuildChannel):
+            channel_id = message.channel.id
+
+        if GUIDELINES_CHANNEL_ID and channel_id == GUIDELINES_CHANNEL_ID:
+            content = message.content.strip()
+            lower = content.lower()
+            if content and looks_like_question(content) and not is_probably_troll(content):
+                if any(keyword in lower for keyword in QUESTION_KEYWORDS):
+                    if self.guidelines.loaded:
+                        rank_name = await self.resolve_member_rank(message.author)
+                        context = self.guidelines.build_context(content)
+                        try:
+                            reply = await self.ai.answer_guidelines(content, rank_name, context)
+                        except Exception as exc:
+                            print(f"[WARN] Failed to answer guidelines question: {exc}")
+                            reply = (
+                                "I’m having trouble accessing the guidelines right now. "
+                                "Please double-check the handbook or reach out to MD management for help."
+                            )
+                        if reply:
+                            try:
+                                await message.channel.send(reply, reference=message)
+                                await log_action(
+                                    "Guidelines Q&A",
+                                    f"Question by {message.author.mention}:\n{escape_markdown(content)}",
+                                )
+                            except Exception as send_exc:
+                                print(f"[WARN] Could not send guidelines reply: {send_exc}")
+                    else:
+                        print("[WARN] Guidelines requested but store is not loaded.")
+
+        await super().on_message(message)
 
     # --- Roblox webhook with activity embeds ---
     async def roblox_handler(self, request):
