@@ -2458,22 +2458,29 @@ async def issue_strike(member: discord.Member, reason: str, *, set_by: int | Non
     return active
 
 async def enforce_three_strikes(member: discord.Member):
+    alert_channel = bot.get_channel(ORIENTATION_ALERT_CHANNEL_ID)
+
     try:
-        await member.send("You've been automatically removed from the Medical Department for reaching **3/3 strikes**.")
+        await member.send(
+            "Hi — this is an automatic notice from the Medical Department.\n\n"
+            "You've reached **3/3 strikes** and staff have been notified. "
+            "You are currently **pending removal**.\n"
+            "If this is a mistake, please contact MD Management."
+        )
     except:
         pass
 
-    roblox_removed = await try_remove_from_roblox(member.id)
+    alert_sent = False
+    if alert_channel:
+        await alert_channel.send(
+            f"{member.mention} has reached 3/3 strikes and is **pending removal**. Please review their status."
+        )
+        alert_sent = True
 
-    kicked = False
-    try:
-        await member.kick(reason="Reached 3/3 strikes — automatic removal.")
-        kicked = True
-    except Exception as e:
-        print(f"Kick failed for {member.id}: {e}")
-
-    await log_action("Three-Strike Removal",
-                     f"Member: {member.mention}\nRoblox removal: {'✅' if roblox_removed else '❌/N/A'}\nDiscord kick: {'✅' if kicked else '❌'}")
+    await log_action(
+        "Three-Strike Escalation",
+        f"Member: {member.mention}\nAction: {'Pending removal alert sent' if alert_sent else 'Alert not sent (channel unavailable)'}"
+    )
 
 @strikes_group.command(name="add", description="(Mgmt) Add a strike to a member.")
 @app_commands.checks.has_role(MANAGEMENT_ROLE_ID)
@@ -2778,32 +2785,34 @@ async def orientation_reminder_loop():
             # Overdue enforcement (only once)
             if remaining <= datetime.timedelta(seconds=0) and not expired_handled:
                 member = find_member(discord_id)
+
                 if member:
                     try:
                         await member.send(
                             "Hi — this is an automatic notice from the Medical Department.\n\n"
-                            "Your **2-week orientation deadline** has passed and you have been **removed** due to not completing orientation in time.\n"
+                            "Your **2-week orientation deadline** has passed and staff have been notified. "
+                            "You are currently **pending removal**.\n"
                             "If this is a mistake, please contact MD Management."
                         )
                     except:
                         pass
 
-                    roblox_removed = await try_remove_from_roblox(discord_id)
-
-                    try:
-                        await member.kick(reason="Orientation deadline expired — automatic removal.")
-                        kicked = True
-                    except Exception as e:
-                        print(f"Kick failed for {member.id}: {e}")
-                        kicked = False
-
-                    await log_action(
-                        "Orientation Expiry Enforced",
-                        f"Member: <@{discord_id}>\nRoblox removal: {'✅' if roblox_removed else 'Skipped/Failed ❌'}\nDiscord kick: {'✅' if kicked else '❌'}"
+                alert_sent = False
+                if alert_channel:
+                    mention = member.mention if member else f"<@{discord_id}>"
+                    await alert_channel.send(
+                        f"{mention} has missed their orientation deadline and is **pending removal**."
+                        " Please review their status."
                     )
+                    alert_sent = True
 
-                    async with bot.db_pool.acquire() as conn3:
-                        await conn3.execute("UPDATE orientations SET expired_handled = TRUE WHERE discord_id = $1", discord_id)
+                await log_action(
+                    "Orientation Deadline Escalated",
+                    f"Member: <@{discord_id}>\nAction: {'Pending removal alert sent' if alert_sent else 'Alert not sent (channel unavailable)'}"
+                )
+
+                async with bot.db_pool.acquire() as conn3:
+                    await conn3.execute("UPDATE orientations SET expired_handled = TRUE WHERE discord_id = $1", discord_id)
     except Exception as e:
         print(f"orientation_reminder_loop error: {e}")
 
