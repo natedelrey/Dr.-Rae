@@ -1217,7 +1217,6 @@ tasks_group = app_commands.Group(name="tasks", description="Commands for trackin
 orientation_group = app_commands.Group(name="orientation", description="Manage member orientation progress.")
 strikes_group = app_commands.Group(name="strikes", description="Manage member strikes.")
 excuses_group = app_commands.Group(name="excuses", description="Manage activity excuses.")
-guidelines_group = app_commands.Group(name="guidelines", description="Help Dr. Rae answer guideline questions accurately.")
 
 # === Events ===
 @bot.event
@@ -1255,56 +1254,6 @@ async def global_app_command_error(interaction: discord.Interaction, error: app_
                 await interaction.response.send_message("Sorry, something went wrong running that command.", ephemeral=True)
             except:
                 pass
-
-@guidelines_group.command(name="context", description="Save extra background so Dr. Rae can tailor answers to you.")
-@app_commands.describe(details="Key responsibilities, roles, or expectations you want Dr. Rae to remember (max 1000 characters).")
-async def guidelines_context(interaction: discord.Interaction, details: str):
-    await bot.ensure_bootstrap()
-    trimmed = details.strip()
-    if not trimmed:
-        await interaction.response.send_message("Please include a little information for me to remember.", ephemeral=True)
-        return
-    if len(trimmed) > 1000:
-        await interaction.response.send_message("Please keep the saved context under 1000 characters.", ephemeral=True)
-        return
-    await bot.set_guideline_context(interaction.user.id, trimmed)
-    await log_action(
-        "Guidelines Context Updated",
-        f"User: {interaction.user.mention}\nDetails: {escape_markdown(trimmed)}",
-    )
-    await interaction.response.send_message(
-        "Got it! I’ll factor that in when answering your future guideline questions.",
-        ephemeral=True,
-    )
-
-@guidelines_group.command(name="show_context", description="See what extra background Dr. Rae currently remembers about you.")
-async def guidelines_show_context(interaction: discord.Interaction):
-    await bot.ensure_bootstrap()
-    details = await bot.get_guideline_context(interaction.user.id)
-    if details:
-        await interaction.response.send_message(
-            f"Here’s what I have saved right now:\n\n{details}",
-            ephemeral=True,
-        )
-    else:
-        await interaction.response.send_message(
-            "I don’t have any extra context saved for you yet. Use `/guidelines context` to add some!",
-            ephemeral=True,
-        )
-
-@guidelines_group.command(name="clear_context", description="Remove any extra background saved for guideline answers.")
-async def guidelines_clear_context(interaction: discord.Interaction):
-    await bot.ensure_bootstrap()
-    existing = await bot.get_guideline_context(interaction.user.id)
-    if not existing:
-        await interaction.response.send_message("There isn’t any saved context to clear.", ephemeral=True)
-        return
-    await bot.clear_guideline_context(interaction.user.id)
-    await log_action(
-        "Guidelines Context Cleared",
-        f"User: {interaction.user.mention}",
-    )
-    await interaction.response.send_message("All set. I’ve cleared your saved context.", ephemeral=True)
 
 # === PART 1/3 END ===
 # Reply "next" and I'll send PART 2/3 with: /verify, the /apply wizard, AI review, and auto-accept (including accept-join → rank → welcome).
@@ -2845,7 +2794,6 @@ bot.tree.add_command(tasks_group)
 bot.tree.add_command(orientation_group)
 bot.tree.add_command(strikes_group)
 bot.tree.add_command(excuses_group)
-bot.tree.add_command(guidelines_group)
 
 # ---------- Run ----------
 if __name__ == "__main__":
