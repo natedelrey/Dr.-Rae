@@ -43,7 +43,6 @@ COMMAND_LOG_CHANNEL_ID       = getenv_int("COMMAND_LOG_CHANNEL_ID", 141696569623
 ACTIVITY_LOG_CHANNEL_ID      = getenv_int("ACTIVITY_LOG_CHANNEL_ID", 1409646416829354095)
 COMMS_CHANNEL_ID             = getenv_int("COMMS_CHANNEL_ID")
 APPLICATION_MANAGEMENT_CHANNEL_ID = 1405988167982649436
-GUIDELINES_CHANNEL_ID        = getenv_int("GUIDELINES_CHANNEL_ID")
 
 # Extra roles to grant on successful application
 APPLICATION_EXTRA_ROLE_IDS = [
@@ -1145,58 +1144,6 @@ class MD_BOT(commands.Bot):
         elif isinstance(message.channel, discord.abc.GuildChannel):
             channel_id = message.channel.id
 
-        if GUIDELINES_CHANNEL_ID and channel_id == GUIDELINES_CHANNEL_ID:
-            content = message.content.strip()
-            lower = content.lower()
-            if content and looks_like_question(content) and not is_probably_troll(content):
-                if any(keyword in lower for keyword in QUESTION_KEYWORDS):
-                    if self.guidelines.loaded:
-                        rank_name = await self.resolve_member_rank(message.author)
-                        context = self.guidelines.build_context(content)
-                        extra_context = await self.get_guideline_context(message.author.id)
-                        combined_context = context or ""
-                        if extra_context:
-                            combined_context = (combined_context + "\n\nMember-provided context:\n" + extra_context).strip()
-                        if not combined_context.strip():
-                            unsure = (
-                                "I want to help, but I’m not sure I have the right details yet. "
-                                "Please share more background with `/guidelines context` so I can give an accurate answer."
-                            )
-                            try:
-                                await message.channel.send(unsure, reference=message)
-                            except Exception as send_exc:
-                                print(f"[WARN] Could not send guidelines unsure reply: {send_exc}")
-                        else:
-                            try:
-                                async with message.channel.typing():
-                                    reply = await self.ai.answer_guidelines(content, rank_name, combined_context)
-                            except Exception as exc:
-                                print(f"[WARN] Failed to answer guidelines question: {exc}")
-                                reply = (
-                                    "I’m having trouble accessing the guidelines right now. "
-                                    "Please double-check the handbook or reach out to MD management for help."
-                                )
-                            if reply:
-                                try:
-                                    await message.channel.send(reply, reference=message)
-                                    await log_action(
-                                        "Guidelines Q&A",
-                                        f"Question by {message.author.mention}:\n{escape_markdown(content)}",
-                                    )
-                                except Exception as send_exc:
-                                    print(f"[WARN] Could not send guidelines reply: {send_exc}")
-                    else:
-                        print("[WARN] Guidelines requested but store is not loaded.")
-                else:
-                    unsure = (
-                        "I’m not completely sure how to answer that. "
-                        "If you can include more details or use `/guidelines context` to share background, I can give a better reply."
-                    )
-                    try:
-                        await message.channel.send(unsure, reference=message)
-                    except Exception as send_exc:
-                        print(f"[WARN] Could not send unsure guidelines prompt: {send_exc}")
-
         await super().on_message(message)
 
     # --- Roblox webhook with activity embeds ---
@@ -1270,7 +1217,6 @@ tasks_group = app_commands.Group(name="tasks", description="Commands for trackin
 orientation_group = app_commands.Group(name="orientation", description="Manage member orientation progress.")
 strikes_group = app_commands.Group(name="strikes", description="Manage member strikes.")
 excuses_group = app_commands.Group(name="excuses", description="Manage activity excuses.")
-guidelines_group = app_commands.Group(name="guidelines", description="Help Dr. Rae answer guideline questions accurately.")
 
 # === Events ===
 @bot.event
@@ -1308,56 +1254,6 @@ async def global_app_command_error(interaction: discord.Interaction, error: app_
                 await interaction.response.send_message("Sorry, something went wrong running that command.", ephemeral=True)
             except:
                 pass
-
-@guidelines_group.command(name="context", description="Save extra background so Dr. Rae can tailor answers to you.")
-@app_commands.describe(details="Key responsibilities, roles, or expectations you want Dr. Rae to remember (max 1000 characters).")
-async def guidelines_context(interaction: discord.Interaction, details: str):
-    await bot.ensure_bootstrap()
-    trimmed = details.strip()
-    if not trimmed:
-        await interaction.response.send_message("Please include a little information for me to remember.", ephemeral=True)
-        return
-    if len(trimmed) > 1000:
-        await interaction.response.send_message("Please keep the saved context under 1000 characters.", ephemeral=True)
-        return
-    await bot.set_guideline_context(interaction.user.id, trimmed)
-    await log_action(
-        "Guidelines Context Updated",
-        f"User: {interaction.user.mention}\nDetails: {escape_markdown(trimmed)}",
-    )
-    await interaction.response.send_message(
-        "Got it! I’ll factor that in when answering your future guideline questions.",
-        ephemeral=True,
-    )
-
-@guidelines_group.command(name="show_context", description="See what extra background Dr. Rae currently remembers about you.")
-async def guidelines_show_context(interaction: discord.Interaction):
-    await bot.ensure_bootstrap()
-    details = await bot.get_guideline_context(interaction.user.id)
-    if details:
-        await interaction.response.send_message(
-            f"Here’s what I have saved right now:\n\n{details}",
-            ephemeral=True,
-        )
-    else:
-        await interaction.response.send_message(
-            "I don’t have any extra context saved for you yet. Use `/guidelines context` to add some!",
-            ephemeral=True,
-        )
-
-@guidelines_group.command(name="clear_context", description="Remove any extra background saved for guideline answers.")
-async def guidelines_clear_context(interaction: discord.Interaction):
-    await bot.ensure_bootstrap()
-    existing = await bot.get_guideline_context(interaction.user.id)
-    if not existing:
-        await interaction.response.send_message("There isn’t any saved context to clear.", ephemeral=True)
-        return
-    await bot.clear_guideline_context(interaction.user.id)
-    await log_action(
-        "Guidelines Context Cleared",
-        f"User: {interaction.user.mention}",
-    )
-    await interaction.response.send_message("All set. I’ve cleared your saved context.", ephemeral=True)
 
 # === PART 1/3 END ===
 # Reply "next" and I'll send PART 2/3 with: /verify, the /apply wizard, AI review, and auto-accept (including accept-join → rank → welcome).
@@ -2898,7 +2794,6 @@ bot.tree.add_command(tasks_group)
 bot.tree.add_command(orientation_group)
 bot.tree.add_command(strikes_group)
 bot.tree.add_command(excuses_group)
-bot.tree.add_command(guidelines_group)
 
 # ---------- Run ----------
 if __name__ == "__main__":
