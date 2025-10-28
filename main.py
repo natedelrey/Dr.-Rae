@@ -43,7 +43,6 @@ COMMAND_LOG_CHANNEL_ID       = getenv_int("COMMAND_LOG_CHANNEL_ID", 141696569623
 ACTIVITY_LOG_CHANNEL_ID      = getenv_int("ACTIVITY_LOG_CHANNEL_ID", 1409646416829354095)
 COMMS_CHANNEL_ID             = getenv_int("COMMS_CHANNEL_ID")
 APPLICATION_MANAGEMENT_CHANNEL_ID = 1405988167982649436
-GUIDELINES_CHANNEL_ID        = getenv_int("GUIDELINES_CHANNEL_ID")
 
 # Extra roles to grant on successful application
 APPLICATION_EXTRA_ROLE_IDS = [
@@ -1144,58 +1143,6 @@ class MD_BOT(commands.Bot):
             channel_id = message.channel.parent_id
         elif isinstance(message.channel, discord.abc.GuildChannel):
             channel_id = message.channel.id
-
-        if GUIDELINES_CHANNEL_ID and channel_id == GUIDELINES_CHANNEL_ID:
-            content = message.content.strip()
-            lower = content.lower()
-            if content and looks_like_question(content) and not is_probably_troll(content):
-                if any(keyword in lower for keyword in QUESTION_KEYWORDS):
-                    if self.guidelines.loaded:
-                        rank_name = await self.resolve_member_rank(message.author)
-                        context = self.guidelines.build_context(content)
-                        extra_context = await self.get_guideline_context(message.author.id)
-                        combined_context = context or ""
-                        if extra_context:
-                            combined_context = (combined_context + "\n\nMember-provided context:\n" + extra_context).strip()
-                        if not combined_context.strip():
-                            unsure = (
-                                "I want to help, but I’m not sure I have the right details yet. "
-                                "Please share more background with `/guidelines context` so I can give an accurate answer."
-                            )
-                            try:
-                                await message.channel.send(unsure, reference=message)
-                            except Exception as send_exc:
-                                print(f"[WARN] Could not send guidelines unsure reply: {send_exc}")
-                        else:
-                            try:
-                                async with message.channel.typing():
-                                    reply = await self.ai.answer_guidelines(content, rank_name, combined_context)
-                            except Exception as exc:
-                                print(f"[WARN] Failed to answer guidelines question: {exc}")
-                                reply = (
-                                    "I’m having trouble accessing the guidelines right now. "
-                                    "Please double-check the handbook or reach out to MD management for help."
-                                )
-                            if reply:
-                                try:
-                                    await message.channel.send(reply, reference=message)
-                                    await log_action(
-                                        "Guidelines Q&A",
-                                        f"Question by {message.author.mention}:\n{escape_markdown(content)}",
-                                    )
-                                except Exception as send_exc:
-                                    print(f"[WARN] Could not send guidelines reply: {send_exc}")
-                    else:
-                        print("[WARN] Guidelines requested but store is not loaded.")
-                else:
-                    unsure = (
-                        "I’m not completely sure how to answer that. "
-                        "If you can include more details or use `/guidelines context` to share background, I can give a better reply."
-                    )
-                    try:
-                        await message.channel.send(unsure, reference=message)
-                    except Exception as send_exc:
-                        print(f"[WARN] Could not send unsure guidelines prompt: {send_exc}")
 
         await super().on_message(message)
 
