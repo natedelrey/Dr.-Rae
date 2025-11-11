@@ -1882,7 +1882,13 @@ class LogTaskForm(discord.ui.Modal, title='Add Comments (optional)'):
         self.proof = proof
         self.task_type = task_type
 
-    comments = discord.ui.TextInput(label='Comments', placeholder='Any additional comments?', style=discord.TextStyle.paragraph, required=False, max_length=1000)
+    comments = discord.ui.TextInput(
+        label='Comments',
+        placeholder='Any additional comments?',
+        style=discord.TextStyle.paragraph,
+        required=False,
+        max_length=4000,
+    )
 
     async def on_submit(self, interaction: discord.Interaction):
         log_channel = bot.get_channel(LOG_CHANNEL_ID)
@@ -1984,7 +1990,7 @@ async def tasks_add(
     member: discord.Member,
     task_type: str,
     count: app_commands.Range[int, 1, 100] = 1,
-    comments: str | None = None,
+    comments: app_commands.Range[str, 0, 4000] | None = None,
     proof: discord.Attachment | None = None,
 ):
     now = utcnow()
