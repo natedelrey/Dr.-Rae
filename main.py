@@ -101,8 +101,8 @@ RANK_MANAGER_ROLE_ID = getenv_int("RANK_MANAGER_ROLE_ID", 1405979816120942702)
 STAFF_ROLE_ID = getenv_int("STAFF_ROLE_ID", (MANAGEMENT_ROLE_ID or 0))
 
 # Weekly configs
-WEEKLY_REQUIREMENT      = int(os.getenv("WEEKLY_REQUIREMENT", "3"))
-WEEKLY_TIME_REQUIREMENT = int(os.getenv("WEEKLY_TIME_REQUIREMENT", "45"))  # minutes
+WEEKLY_REQUIREMENT      = int(os.getenv("WEEKLY_REQUIREMENT", "1"))
+WEEKLY_TIME_REQUIREMENT = int(os.getenv("WEEKLY_TIME_REQUIREMENT", "30"))  # minutes
 
 # === Bot Setup ===
 intents = discord.Intents.default()
