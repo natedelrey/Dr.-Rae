@@ -43,6 +43,7 @@ COMMAND_LOG_CHANNEL_ID       = getenv_int("COMMAND_LOG_CHANNEL_ID", 141696569623
 ACTIVITY_LOG_CHANNEL_ID      = getenv_int("ACTIVITY_LOG_CHANNEL_ID", 1409646416829354095)
 COMMS_CHANNEL_ID             = getenv_int("COMMS_CHANNEL_ID")
 APPLICATION_MANAGEMENT_CHANNEL_ID = 1405988167982649436
+MEDICAL_INFO_CHANNEL_ID = getenv_int("MEDICAL_INFO_CHANNEL_ID", 1405982459866124369)
 
 # Extra roles to grant on successful application
 APPLICATION_EXTRA_ROLE_IDS = [
@@ -1219,12 +1220,85 @@ orientation_group = app_commands.Group(name="orientation", description="Manage m
 strikes_group = app_commands.Group(name="strikes", description="Manage member strikes.")
 excuses_group = app_commands.Group(name="excuses", description="Manage activity excuses.")
 
+
+class MedicalInfoView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+        self.add_item(discord.ui.Button(label="Application Form", style=discord.ButtonStyle.link, url="https://forms.gle/Rjef8PHUJ29oYMEU6"))
+        self.add_item(discord.ui.Button(label="Psychology Hub", style=discord.ButtonStyle.link, url="https://trello.com/b/B6eHAvEN/md-psychology-hub"))
+        self.add_item(discord.ui.Button(label="Pathology Hub", style=discord.ButtonStyle.link, url="https://trello.com/b/QPD3QshW/md-pathology-hub"))
+        self.add_item(discord.ui.Button(label="Core Guidelines", style=discord.ButtonStyle.link, url="https://trello.com/b/j2jvme4Z/md-information-hub"))
+        self.add_item(discord.ui.Button(label="Discord Invite", style=discord.ButtonStyle.link, url="https://discord.gg/GWkEw9yxqM"))
+        self.add_item(discord.ui.Button(label="Roblox Community", style=discord.ButtonStyle.link, url="https://www.roblox.com/communities/695368604/SCPF-Medical-Division"))
+
+
+def build_medical_info_embed() -> discord.Embed:
+    embed = discord.Embed(
+        title="Medical Department Information",
+        description=(
+            "Welcome to the Medical Department! Explore our resources below to learn about our "
+            "guidelines, hubs, and how to get involved."
+        ),
+        color=discord.Color.teal(),
+        timestamp=utcnow(),
+    )
+    embed.add_field(
+        name="Getting Started",
+        value=(
+            "• Submit your interest via the [Application Form](https://forms.gle/Rjef8PHUJ29oYMEU6).\n"
+            "• Join the [Roblox Community](https://www.roblox.com/communities/695368604/SCPF-Medical-Division).\n"
+            "• Review the [Core Guidelines](https://trello.com/b/j2jvme4Z/md-information-hub)."
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="Department Resources",
+        value=(
+            "• Dive into the [Psychology Hub](https://trello.com/b/B6eHAvEN/md-psychology-hub).\n"
+            "• Visit the [Pathology Hub](https://trello.com/b/QPD3QshW/md-pathology-hub)."
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="Community Links",
+        value="Connect with us on [Discord](https://discord.gg/GWkEw9yxqM).",
+        inline=False,
+    )
+    embed.set_footer(text="This message refreshes automatically whenever the bot restarts.")
+    return embed
+
+
+async def refresh_medical_info_message():
+    if not MEDICAL_INFO_CHANNEL_ID:
+        return
+
+    channel = bot.get_channel(MEDICAL_INFO_CHANNEL_ID)
+    if not isinstance(channel, discord.TextChannel):
+        print(f"[WARN] Medical info channel not found: {MEDICAL_INFO_CHANNEL_ID}")
+        return
+
+    try:
+        async for message in channel.history(limit=25):
+            if message.author == bot.user:
+                try:
+                    await message.delete()
+                except Exception as exc:
+                    print(f"[WARN] Could not delete old medical info message {message.id}: {exc}")
+    except Exception as exc:
+        print(f"[WARN] Could not scan medical info channel: {exc}")
+
+    try:
+        await channel.send(embed=build_medical_info_embed(), view=MedicalInfoView())
+    except Exception as exc:
+        print(f"[WARN] Could not send medical info embed: {exc}")
+
 # === Events ===
 @bot.event
 async def on_ready():
     print(f'[READY] Logged in as {bot.user.name}')
     print("Activity channel:", bot.get_channel(ACTIVITY_LOG_CHANNEL_ID))
     print("Command log channel:", bot.get_channel(COMMAND_LOG_CHANNEL_ID))
+    await refresh_medical_info_message()
     check_weekly_tasks.start()
     orientation_reminder_loop.start()
 
