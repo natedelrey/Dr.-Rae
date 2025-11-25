@@ -1221,15 +1221,86 @@ strikes_group = app_commands.Group(name="strikes", description="Manage member st
 excuses_group = app_commands.Group(name="excuses", description="Manage activity excuses.")
 
 
+RESOURCE_DETAILS: dict[str, dict[str, str]] = {
+    "application": {
+        "label": "Application Form",
+        "emoji": "📝",
+        "description": "Submit your interest and join the Medical Department.",
+        "link": "https://forms.gle/Rjef8PHUJ29oYMEU6",
+        "blurb": (
+            "Complete the official application to be considered for the Medical Department. "
+            "Answer thoroughly and review before submitting."
+        ),
+    },
+    "psychology": {
+        "label": "Psychology Hub",
+        "emoji": "🧠",
+        "description": "Reference material for the Psychology specialization.",
+        "link": "https://trello.com/b/B6eHAvEN/md-psychology-hub",
+        "blurb": "Find guidance, expectations, and resources for psychology staff.",
+    },
+    "pathology": {
+        "label": "Pathology Hub",
+        "emoji": "🧬",
+        "description": "Reference material for the Pathology specialization.",
+        "link": "https://trello.com/b/QPD3QshW/md-pathology-hub",
+        "blurb": "Review pathology protocols, tools, and key procedures.",
+    },
+}
+
+
+class MedicalInfoSelect(discord.ui.Select):
+    def __init__(self):
+        options = [
+            discord.SelectOption(
+                label=details["label"],
+                value=key,
+                description=details["description"][:99],
+                emoji=details.get("emoji"),
+            )
+            for key, details in RESOURCE_DETAILS.items()
+        ]
+
+        super().__init__(
+            placeholder="More Medical Department resources…",
+            min_values=1,
+            max_values=1,
+            options=options,
+            custom_id="medical-info-select",
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        selection = self.values[0]
+        resource = RESOURCE_DETAILS.get(selection)
+        if not resource:
+            if interaction.response.is_done():
+                await interaction.followup.send("That resource is unavailable right now.", ephemeral=True)
+            else:
+                await interaction.response.send_message("That resource is unavailable right now.", ephemeral=True)
+            return
+
+        embed = discord.Embed(
+            title=resource["label"],
+            description=resource["blurb"],
+            color=discord.Color.blurple(),
+            timestamp=utcnow(),
+        )
+        embed.add_field(name="Link", value=f"[Open]({resource['link']})", inline=False)
+        embed.set_footer(text="Only you can see this resource card.")
+
+        if interaction.response.is_done():
+            await interaction.followup.send(embed=embed, ephemeral=True)
+        else:
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
 class MedicalInfoView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
-        self.add_item(discord.ui.Button(label="Application Form", style=discord.ButtonStyle.link, url="https://forms.gle/Rjef8PHUJ29oYMEU6"))
-        self.add_item(discord.ui.Button(label="Psychology Hub", style=discord.ButtonStyle.link, url="https://trello.com/b/B6eHAvEN/md-psychology-hub"))
-        self.add_item(discord.ui.Button(label="Pathology Hub", style=discord.ButtonStyle.link, url="https://trello.com/b/QPD3QshW/md-pathology-hub"))
         self.add_item(discord.ui.Button(label="Core Guidelines", style=discord.ButtonStyle.link, url="https://trello.com/b/j2jvme4Z/md-information-hub"))
         self.add_item(discord.ui.Button(label="Discord Invite", style=discord.ButtonStyle.link, url="https://discord.gg/GWkEw9yxqM"))
         self.add_item(discord.ui.Button(label="Roblox Community", style=discord.ButtonStyle.link, url="https://www.roblox.com/communities/695368604/SCPF-Medical-Division"))
+        self.add_item(MedicalInfoSelect())
 
 
 def build_medical_info_embed() -> discord.Embed:
@@ -1237,7 +1308,8 @@ def build_medical_info_embed() -> discord.Embed:
         title="Medical Department Information",
         description=(
             "Welcome to the Medical Department! Explore our resources below to learn about our "
-            "guidelines, hubs, and how to get involved."
+            "guidelines, hubs, and how to get involved. Use the buttons for quick access to the top "
+            "links, or the menu for more resources."
         ),
         color=discord.Color.teal(),
         timestamp=utcnow(),
