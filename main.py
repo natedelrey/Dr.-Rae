@@ -1317,24 +1317,18 @@ def build_medical_info_embed() -> discord.Embed:
         name="🚀 Quick Start",
         value=(
             "• 🔗 Tap the buttons below for the Core Guidelines, Discord, and Roblox community.\n"
-            "• 📬 Watch this channel for refreshed info whenever the bot restarts."
+            "• 📬 This is our most up-to-date information."
         ),
         inline=False,
     )
     embed.add_field(
         name="🧭 Where to explore",
         value=(
-            "• 🗂️ Use the dropdown for application info and specialization hubs.\n"
-            "• 🆘 If you need help, ping the department staff in the Discord."
+            "• Use the dropdown for application info and sub-division information.\n"
         ),
         inline=False,
     )
-    embed.add_field(
-        name="🤝 Stay connected",
-        value="Join events, ask questions, and collaborate with fellow members in Discord.",
-        inline=False,
-    )
-    embed.set_footer(text="This message refreshes automatically whenever the bot restarts.")
+    embed.set_footer(text="This message refreshes automatically when the bot restarts.")
     return embed
 
 
