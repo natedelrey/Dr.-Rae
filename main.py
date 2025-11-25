@@ -876,7 +876,18 @@ class MD_BOT(commands.Bot):
             print("[DB] Connected.")
         except Exception as e:
             print(f"[DB] FAILED: {e}")
+            # Even if the DB is down, still attempt to register slash commands so the
+            # tree stays current. The commands that rely on the DB will surface
+            # their own errors when invoked.
+            try:
+                synced = await self.tree.sync()
+                print(f"[Slash] Synced {len(synced)} command(s) (DB unavailable)")
+            except Exception as sync_err:
+                print(f"[Slash] Sync failed without DB: {sync_err}")
             return
+
+        # Run bootstrap (schema, web server, slash sync)
+        await self.ensure_bootstrap()
 
     async def ensure_bootstrap(self) -> None:
         if self._bootstrap_complete or not self.db_pool:
