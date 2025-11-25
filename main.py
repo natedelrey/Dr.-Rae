@@ -1305,35 +1305,33 @@ class MedicalInfoView(discord.ui.View):
 
 def build_medical_info_embed() -> discord.Embed:
     embed = discord.Embed(
-        title="Medical Department Information",
+        title="🏥 Medical Department Information",
         description=(
-            "Welcome to the Medical Department! Explore our resources below to learn about our "
-            "guidelines, hubs, and how to get involved. Use the buttons for quick access to the top "
-            "links, or the menu for more resources."
+            "Welcome to the Medical Department! Use the buttons for our most important links "
+            "and the dropdown for detailed resource cards."
         ),
         color=discord.Color.teal(),
         timestamp=utcnow(),
     )
     embed.add_field(
-        name="Getting Started",
+        name="🚀 Quick Start",
         value=(
-            "• Submit your interest via the [Application Form](https://forms.gle/Rjef8PHUJ29oYMEU6).\n"
-            "• Join the [Roblox Community](https://www.roblox.com/communities/695368604/SCPF-Medical-Division).\n"
-            "• Review the [Core Guidelines](https://trello.com/b/j2jvme4Z/md-information-hub)."
+            "• 🔗 Tap the buttons below for the Core Guidelines, Discord, and Roblox community.\n"
+            "• 📬 Watch this channel for refreshed info whenever the bot restarts."
         ),
         inline=False,
     )
     embed.add_field(
-        name="Department Resources",
+        name="🧭 Where to explore",
         value=(
-            "• Dive into the [Psychology Hub](https://trello.com/b/B6eHAvEN/md-psychology-hub).\n"
-            "• Visit the [Pathology Hub](https://trello.com/b/QPD3QshW/md-pathology-hub)."
+            "• 🗂️ Use the dropdown for application info and specialization hubs.\n"
+            "• 🆘 If you need help, ping the department staff in the Discord."
         ),
         inline=False,
     )
     embed.add_field(
-        name="Community Links",
-        value="Connect with us on [Discord](https://discord.gg/GWkEw9yxqM).",
+        name="🤝 Stay connected",
+        value="Join events, ask questions, and collaborate with fellow members in Discord.",
         inline=False,
     )
     embed.set_footer(text="This message refreshes automatically whenever the bot restarts.")
