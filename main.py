@@ -43,6 +43,7 @@ COMMAND_LOG_CHANNEL_ID       = getenv_int("COMMAND_LOG_CHANNEL_ID", 141696569623
 ACTIVITY_LOG_CHANNEL_ID      = getenv_int("ACTIVITY_LOG_CHANNEL_ID", 1409646416829354095)
 COMMS_CHANNEL_ID             = getenv_int("COMMS_CHANNEL_ID")
 APPLICATION_MANAGEMENT_CHANNEL_ID = 1405988167982649436
+MEDICAL_INFO_CHANNEL_ID = getenv_int("MEDICAL_INFO_CHANNEL_ID", 1405982459866124369)
 
 # Extra roles to grant on successful application
 APPLICATION_EXTRA_ROLE_IDS = [
@@ -1219,12 +1220,117 @@ orientation_group = app_commands.Group(name="orientation", description="Manage m
 strikes_group = app_commands.Group(name="strikes", description="Manage member strikes.")
 excuses_group = app_commands.Group(name="excuses", description="Manage activity excuses.")
 
+
+RESOURCE_LINKS = {
+    "Application Form": "https://forms.gle/Rjef8PHUJ29oYMEU6",
+    "Psychology Hub": "https://trello.com/b/B6eHAvEN/md-psychology-hub",
+    "Pathology Hub": "https://trello.com/b/QPD3QshW/md-pathology-hub",
+    "Core Guidelines": "https://trello.com/b/j2jvme4Z/md-information-hub",
+    "Discord Invite": "https://discord.gg/GWkEw9yxqM",
+    "Roblox Community": "https://www.roblox.com/communities/695368604/SCPF-Medical-Division",
+}
+
+
+class MedicalResourceSelect(discord.ui.Select):
+    def __init__(self):
+        options = [
+            discord.SelectOption(label="Application Form", description="Apply to join the Medical Department", emoji="📝"),
+            discord.SelectOption(label="Psychology Hub", description="Guidance for psychological practices", emoji="🧠"),
+            discord.SelectOption(label="Pathology Hub", description="Resources for pathology", emoji="🧪"),
+            discord.SelectOption(label="Core Guidelines", description="Rules and expectations", emoji="📘"),
+            discord.SelectOption(label="Discord Invite", description="Join the community server", emoji="💬"),
+            discord.SelectOption(label="Roblox Community", description="Visit the Roblox group", emoji="🕹️"),
+        ]
+        super().__init__(
+            placeholder="Select a Medical Department resource…",
+            min_values=1,
+            max_values=1,
+            options=options,
+            custom_id="medical_info_select",
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        choice = self.values[0]
+        url = RESOURCE_LINKS.get(choice)
+        if not url:
+            await interaction.response.send_message("That resource is currently unavailable.", ephemeral=True)
+            return
+
+        button_view = discord.ui.View()
+        button_view.add_item(discord.ui.Button(label=choice, style=discord.ButtonStyle.link, url=url, emoji=self._selected_emoji()))
+        await interaction.response.send_message(
+            f"Here you go: **{choice}**",
+            view=button_view,
+            ephemeral=True,
+        )
+
+    def _selected_emoji(self) -> str | None:
+        return next((opt.emoji for opt in self.options if opt.label == self.values[0]), None)
+
+
+class MedicalInfoView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+        self.add_item(MedicalResourceSelect())
+
+
+def build_medical_info_embed() -> discord.Embed:
+    embed = discord.Embed(
+        title="🩺 Medical Department Hub",
+        description=(
+            "Welcome aboard! This message refreshes automatically whenever the bot restarts. "
+            "Use the menu below to jump to applications, hubs, and community spaces."
+        ),
+        color=discord.Color.blurple(),
+        timestamp=utcnow(),
+    )
+    embed.add_field(
+        name="✨ Quick Tips",
+        value=(
+            "📌 Choose a resource from the dropdown to get its link.\n"
+            "👋 Need help? Ask in the Medical Department server after joining.\n"
+            "✅ Keep an eye on updates for new guidelines and hubs."
+        ),
+        inline=False,
+    )
+    embed.set_footer(text="SCPF Medical Department • Resources at your fingertips")
+    return embed
+
+
+async def refresh_medical_info_message():
+    if not MEDICAL_INFO_CHANNEL_ID:
+        return
+
+    channel = bot.get_channel(MEDICAL_INFO_CHANNEL_ID)
+    if not isinstance(channel, discord.TextChannel):
+        print(f"[WARN] Medical info channel not found: {MEDICAL_INFO_CHANNEL_ID}")
+        return
+
+    try:
+        async for message in channel.history(limit=25):
+            if message.author == bot.user:
+                try:
+                    await message.delete()
+                except Exception as exc:
+                    print(f"[WARN] Could not delete old medical info message {message.id}: {exc}")
+    except Exception as exc:
+        print(f"[WARN] Could not scan medical info channel: {exc}")
+
+    try:
+        await channel.send(embed=build_medical_info_embed(), view=MedicalInfoView())
+    except Exception as exc:
+        print(f"[WARN] Could not send medical info embed: {exc}")
+
 # === Events ===
 @bot.event
 async def on_ready():
     print(f'[READY] Logged in as {bot.user.name}')
     print("Activity channel:", bot.get_channel(ACTIVITY_LOG_CHANNEL_ID))
     print("Command log channel:", bot.get_channel(COMMAND_LOG_CHANNEL_ID))
+    if not getattr(bot, "medical_view_registered", False):
+        bot.add_view(MedicalInfoView())
+        bot.medical_view_registered = True
+    await refresh_medical_info_message()
     check_weekly_tasks.start()
     orientation_reminder_loop.start()
 
