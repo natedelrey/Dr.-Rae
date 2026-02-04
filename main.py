@@ -43,7 +43,6 @@ COMMAND_LOG_CHANNEL_ID       = getenv_int("COMMAND_LOG_CHANNEL_ID", 141696569623
 ACTIVITY_LOG_CHANNEL_ID      = getenv_int("ACTIVITY_LOG_CHANNEL_ID", 1409646416829354095)
 COMMS_CHANNEL_ID             = getenv_int("COMMS_CHANNEL_ID")
 APPLICATION_MANAGEMENT_CHANNEL_ID = 1405988167982649436
-MEDICAL_INFO_CHANNEL_ID = getenv_int("MEDICAL_INFO_CHANNEL_ID", 1405982459866124369)
 
 # Extra roles to grant on successful application
 APPLICATION_EXTRA_ROLE_IDS = [
@@ -1254,148 +1253,12 @@ strikes_group = app_commands.Group(name="strikes", description="Manage member st
 excuses_group = app_commands.Group(name="excuses", description="Manage activity excuses.")
 
 
-RESOURCE_DETAILS: dict[str, dict[str, str]] = {
-    "application": {
-        "label": "Application Form",
-        "emoji": "📝",
-        "description": "Submit your interest and join the Medical Department.",
-        "link": "https://forms.gle/Rjef8PHUJ29oYMEU6",
-        "blurb": (
-            "Complete the official application to be considered for the Medical Department. "
-            "Answer thoroughly and review before submitting."
-        ),
-    },
-    "psychology": {
-        "label": "Psychology Hub",
-        "emoji": "🧠",
-        "description": "Reference material for the Psychology specialization.",
-        "link": "https://trello.com/b/B6eHAvEN/md-psychology-hub",
-        "blurb": "Find guidance, expectations, and resources for psychology staff.",
-    },
-    "pathology": {
-        "label": "Pathology Hub",
-        "emoji": "🧬",
-        "description": "Reference material for the Pathology specialization.",
-        "link": "https://trello.com/b/QPD3QshW/md-pathology-hub",
-        "blurb": "Review pathology protocols, tools, and key procedures.",
-    },
-}
-
-
-class MedicalInfoSelect(discord.ui.Select):
-    def __init__(self):
-        options = [
-            discord.SelectOption(
-                label=details["label"],
-                value=key,
-                description=details["description"][:99],
-                emoji=details.get("emoji"),
-            )
-            for key, details in RESOURCE_DETAILS.items()
-        ]
-
-        super().__init__(
-            placeholder="More Medical Department resources…",
-            min_values=1,
-            max_values=1,
-            options=options,
-            custom_id="medical-info-select",
-        )
-
-    async def callback(self, interaction: discord.Interaction):
-        selection = self.values[0]
-        resource = RESOURCE_DETAILS.get(selection)
-        if not resource:
-            if interaction.response.is_done():
-                await interaction.followup.send("That resource is unavailable right now.", ephemeral=True)
-            else:
-                await interaction.response.send_message("That resource is unavailable right now.", ephemeral=True)
-            return
-
-        embed = discord.Embed(
-            title=resource["label"],
-            description=resource["blurb"],
-            color=discord.Color.blurple(),
-            timestamp=utcnow(),
-        )
-        embed.add_field(name="Link", value=f"[Open]({resource['link']})", inline=False)
-        embed.set_footer(text="Only you can see this resource card.")
-
-        if interaction.response.is_done():
-            await interaction.followup.send(embed=embed, ephemeral=True)
-        else:
-            await interaction.response.send_message(embed=embed, ephemeral=True)
-
-
-class MedicalInfoView(discord.ui.View):
-    def __init__(self):
-        super().__init__(timeout=None)
-        self.add_item(discord.ui.Button(label="Core Guidelines", style=discord.ButtonStyle.link, url="https://trello.com/b/j2jvme4Z/md-information-hub"))
-        self.add_item(discord.ui.Button(label="Discord Invite", style=discord.ButtonStyle.link, url="https://discord.gg/GWkEw9yxqM"))
-        self.add_item(discord.ui.Button(label="Roblox Community", style=discord.ButtonStyle.link, url="https://www.roblox.com/communities/695368604/SCPF-Medical-Division"))
-        self.add_item(MedicalInfoSelect())
-
-
-def build_medical_info_embed() -> discord.Embed:
-    embed = discord.Embed(
-        title="🏥 Medical Department Information",
-        description=(
-            "Welcome to the Medical Department! Use the buttons for our most important links "
-            "and the dropdown for detailed resource cards."
-        ),
-        color=discord.Color.teal(),
-        timestamp=utcnow(),
-    )
-    embed.add_field(
-        name="🚀 Quick Start",
-        value=(
-            "• 🔗 Tap the buttons below for the Core Guidelines, Discord, and Roblox community.\n"
-            "• 📬 This is our most up-to-date information."
-        ),
-        inline=False,
-    )
-    embed.add_field(
-        name="🧭 Where to explore",
-        value=(
-            "• Use the dropdown for application info and sub-division information.\n"
-        ),
-        inline=False,
-    )
-    embed.set_footer(text="This message refreshes automatically when the bot restarts.")
-    return embed
-
-
-async def refresh_medical_info_message():
-    if not MEDICAL_INFO_CHANNEL_ID:
-        return
-
-    channel = bot.get_channel(MEDICAL_INFO_CHANNEL_ID)
-    if not isinstance(channel, discord.TextChannel):
-        print(f"[WARN] Medical info channel not found: {MEDICAL_INFO_CHANNEL_ID}")
-        return
-
-    try:
-        async for message in channel.history(limit=25):
-            if message.author == bot.user:
-                try:
-                    await message.delete()
-                except Exception as exc:
-                    print(f"[WARN] Could not delete old medical info message {message.id}: {exc}")
-    except Exception as exc:
-        print(f"[WARN] Could not scan medical info channel: {exc}")
-
-    try:
-        await channel.send(embed=build_medical_info_embed(), view=MedicalInfoView())
-    except Exception as exc:
-        print(f"[WARN] Could not send medical info embed: {exc}")
-
 # === Events ===
 @bot.event
 async def on_ready():
     print(f'[READY] Logged in as {bot.user.name}')
     print("Activity channel:", bot.get_channel(ACTIVITY_LOG_CHANNEL_ID))
     print("Command log channel:", bot.get_channel(COMMAND_LOG_CHANNEL_ID))
-    await refresh_medical_info_message()
     check_weekly_tasks.start()
     orientation_reminder_loop.start()
 
