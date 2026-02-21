@@ -84,11 +84,11 @@ if ROBLOX_REMOVE_URL and not ROBLOX_REMOVE_URL.startswith("http"):
     ROBLOX_REMOVE_URL = "https://" + ROBLOX_REMOVE_URL
 ROBLOX_REMOVE_SECRET = os.getenv("ROBLOX_REMOVE_SECRET") or None
 ROBLOX_GROUP_ID      = os.getenv("ROBLOX_GROUP_ID") or None  # optional, forwarded if present
-ROBLOX_MEDICAL_DIVISION_URL = "https://www.roblox.com/communities/695368604/SCPF-Medical-Division#!/about"
+ROBLOX_MEDICAL_DIVISION_URL = "https://www.roblox.com/communities/34445875/SCPF-Medical-Department#!/about"
 
 APPLICATION_PENDING_WARNING = (
     "⚠️ **Reminder:** Ensure you have a pending join request for the "
-    f"[SCPF Medical Division Roblox group]({ROBLOX_MEDICAL_DIVISION_URL})."
+    f"[SCPF Medical Department Roblox group]({ROBLOX_MEDICAL_DIVISION_URL})."
 )
 
 # Roblox rank configuration for automatic onboarding
