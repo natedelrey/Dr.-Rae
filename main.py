@@ -33,6 +33,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 
 # Channels / roles
 ANNOUNCEMENT_CHANNEL_ID      = getenv_int("ANNOUNCEMENT_CHANNEL_ID")
+WEEKLY_QUOTA_CHANNEL_ID      = getenv_int("WEEKLY_QUOTA_CHANNEL_ID", 1474906766847246478)
 LOG_CHANNEL_ID               = getenv_int("LOG_CHANNEL_ID")
 ANNOUNCEMENT_ROLE_ID         = getenv_int("ANNOUNCEMENT_ROLE_ID")
 MANAGEMENT_ROLE_ID           = getenv_int("MANAGEMENT_ROLE_ID")
@@ -2796,7 +2797,7 @@ async def check_weekly_tasks():
         is_excused_row = await conn.fetchrow("SELECT week_key, reason FROM activity_excuses WHERE week_key=$1", wk)
     excused_reason = is_excused_row["reason"] if is_excused_row else None
 
-    announcement_channel = bot.get_channel(ANNOUNCEMENT_CHANNEL_ID)
+    announcement_channel = bot.get_channel(WEEKLY_QUOTA_CHANNEL_ID)
     if not announcement_channel:
         print("Weekly check failed: Announcement channel not found.")
         return
