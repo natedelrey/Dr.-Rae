@@ -545,7 +545,7 @@ def build_welcome_embed() -> discord.Embed:
         ":two: After you've reviewed our guidelines, focus on getting your **Medical Student Orientation** completed. "
         ":calendar_spiral: These are 30 minute sessions that have to be completed within your first 2 weeks of entry "
         "and can be booked with any member of management, or you can complete one instantly through our "
-        "[Automatic Training Center](https://www.roblox.com/games/108535183817790/Medical-Department-Training).\n\n"
+        "[Automatic Training Center](https://www.roblox.com/games/135840468925158/Medical-Student-Orientation-Center).\n\n"
         ":three: If you are interested in receiving **commission** for your medical duty :money_with_wings:, we offer a "
         "[Medical Outreach Program](https://www.roblox.com/communities/451852407/SCPF-Outreach-Program#!/about) that conducts payouts.\n"
         "> :information_source: If are applying to MD to receive the sign-on bonus, this is a critical step to ensure you "
