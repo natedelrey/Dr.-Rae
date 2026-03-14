@@ -206,6 +206,14 @@ def week_key(dt: datetime.datetime | None = None) -> str:
     iso = d.isocalendar()  # (year, week, weekday)
     return f"{iso.year}-W{iso.week:02d}"
 
+def pretty_date(dt: datetime.datetime) -> str:
+    day = dt.day
+    if 10 <= day % 100 <= 20:
+        suffix = "th"
+    else:
+        suffix = {1: "st", 2: "nd", 3: "rd"}.get(day % 10, "th")
+    return dt.strftime(f"%B {day}{suffix}, %Y")
+
 # === Helpers ===
 def smart_chunk(text, size=4000):
     chunks = []
@@ -2382,6 +2390,33 @@ async def tasks_undo(interaction: discord.Interaction, member: discord.Member):
         ephemeral=True
     )
 
+@tasks_group.command(name="weekly_preview", description="(Mgmt+) Preview the weekly activity summary style without resetting data.")
+@app_commands.checks.has_role(MANAGEMENT_ROLE_ID)
+async def tasks_weekly_preview(interaction: discord.Interaction):
+    wk = week_key()
+    now = utcnow()
+    week_end = now + datetime.timedelta(days=(6 - now.weekday()))
+    week_start = week_end - datetime.timedelta(days=6)
+
+    preview = (
+        f"--- Weekly Task Report (**{wk}**) ---\n"
+        f"Week of **{pretty_date(week_start)}** to **{pretty_date(week_end)}**\n\n"
+        "**✅ Met Requirement (0):**\n—\n\n"
+        "**❌ Below Quota (0):**\n—\n\n"
+        "**🚫 0 Activity (0):**\n—\n\n"
+        "**🟦 Excused (0):**\n—\n\n"
+        "*Robux totals include base payouts from weekly logs. Recruitment +200 promotion bonuses must be manually verified by management.*\n\n"
+        "This is only a preview command for style testing; no data was reset."
+    )
+
+    embed = discord.Embed(
+        title="Weekly Task Summary (Preview)",
+        description=preview,
+        color=discord.Color.from_str("#5aa9ff"),
+        timestamp=utcnow(),
+    )
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
 # ---------- Welcome + DM ----------
 @bot.tree.command(name="welcome", description="Sends the official welcome message.")
 @app_commands.checks.has_role(MANAGEMENT_ROLE_ID)
@@ -2800,6 +2835,9 @@ async def check_weekly_tasks():
         return
 
     wk = week_key()
+    now = utcnow()
+    week_end = now
+    week_start = week_end - datetime.timedelta(days=6)
     # If excused week, post the report but **do not issue strikes**
     async with bot.db_pool.acquire() as conn:
         is_excused_row = await conn.fetchrow("SELECT week_key, reason FROM activity_excuses WHERE week_key=$1", wk)
@@ -2817,8 +2855,6 @@ async def check_weekly_tasks():
         return
 
     dept_member_ids = {m.id for m in dept_role.members if not m.bot}
-
-    now = utcnow()
 
     async with bot.db_pool.acquire() as conn:
         all_tasks = await conn.fetch("SELECT member_id, tasks_completed FROM weekly_tasks")
@@ -2907,11 +2943,14 @@ async def check_weekly_tasks():
 
     def fmt_excused(lst):
         return "\n".join(
-            f"{m.mention} — excused until {expires.strftime('%Y-%m-%d %H:%M UTC')} (Reason: {reason})"
+            f"{m.mention} — excused until {pretty_date(expires)} (Reason: {reason})"
             for m, reason, expires in lst
         ) if lst else "—"
 
-    summary = f"--- Weekly Task Report (**{wk}**){' — EXCUSED' if excused_reason else ''} ---\n\n"
+    summary = (
+        f"--- Weekly Task Report (**{wk}**){' — EXCUSED' if excused_reason else ''} ---\n"
+        f"Week of **{pretty_date(week_start)}** to **{pretty_date(week_end)}**\n\n"
+    )
     if excused_reason:
         summary += f"**Excuse Reason:** {excused_reason}\n\n"
     summary += f"**✅ Met Requirement ({len(met)}):**\n{fmt_met(met)}\n\n"
@@ -2925,7 +2964,7 @@ async def check_weekly_tasks():
         target=announcement_channel,
         title="Weekly Task Summary",
         description=summary,
-        color=discord.Color.gold(),
+        color=discord.Color.from_str("#5aa9ff"),
         footer_text=None
     )
 
