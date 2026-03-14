@@ -127,6 +127,14 @@ TASK_PLURALS = {
     "Medical Department Recruitment": "Medical Department Recruitments",
 }
 
+TASK_ROBUX_PAYOUTS = {
+    "Interview": 20,
+    "Post-Op Interview": 20,
+    "Checkup": 35,
+    "Anomaly Checkup": 100,
+    "Medical Department Recruitment": 5,  # +200 bonus is manually verified by management
+}
+
 # === Application System Config ===
 APPLICATION_AUTO_ACCEPT_THRESHOLD = float(os.getenv("APPLICATION_AUTO_ACCEPT_THRESHOLD", "55"))
 APPLICATION_BORDERLINE_MIN        = float(os.getenv("APPLICATION_BORDERLINE_MIN", "30"))
@@ -2815,6 +2823,10 @@ async def check_weekly_tasks():
     async with bot.db_pool.acquire() as conn:
         all_tasks = await conn.fetch("SELECT member_id, tasks_completed FROM weekly_tasks")
         all_time = await conn.fetch("SELECT member_id, time_spent FROM roblox_time")
+        payout_rows = await conn.fetch(
+            "SELECT member_id, COALESCE(NULLIF(task_type, ''), task) AS ttype, COUNT(*) AS cnt "
+            "FROM weekly_task_logs GROUP BY member_id, ttype"
+        )
         # Pull active strikes counts for all dept members
         strike_counts = {
             r['member_id']: r['cnt'] for r in await conn.fetch(
@@ -2830,6 +2842,14 @@ async def check_weekly_tasks():
 
     tasks_map = {r['member_id']: r['tasks_completed'] for r in all_tasks if r['member_id'] in dept_member_ids}
     time_map = {r['member_id']: r['time_spent'] for r in all_time if r['member_id'] in dept_member_ids}
+    robux_map: dict[int, int] = {}
+    for row in payout_rows:
+        member_id = row['member_id']
+        if member_id not in dept_member_ids:
+            continue
+        payout = TASK_ROBUX_PAYOUTS.get(row['ttype'], 0)
+        if payout:
+            robux_map[member_id] = robux_map.get(member_id, 0) + (payout * row['cnt'])
     excused_map = {
         r['member_id']: (r['reason'], r['expires_at'])
         for r in excused_rows
@@ -2853,11 +2873,12 @@ async def check_weekly_tasks():
             continue
         tasks_done = tasks_map.get(member_id, 0)
         time_done_minutes = (time_map.get(member_id, 0)) // 60
+        robux_total = robux_map.get(member_id, 0)
         sc = strike_counts.get(member_id, 0)
         if tasks_done >= WEEKLY_REQUIREMENT and time_done_minutes >= WEEKLY_TIME_REQUIREMENT:
-            met.append((member, sc))
+            met.append((member, sc, robux_total))
         else:
-            not_met.append((member, tasks_done, time_done_minutes, sc))
+            not_met.append((member, tasks_done, time_done_minutes, sc, robux_total))
 
     zero_ids = dept_member_ids - considered_ids
     for mid in zero_ids:
@@ -2869,17 +2890,20 @@ async def check_weekly_tasks():
                 handled_excused_ids.add(mid)
                 continue
             sc = strike_counts.get(mid, 0)
-            zero.append((member, sc))
+            zero.append((member, sc, robux_map.get(mid, 0)))
 
     # Post report
     def fmt_met(lst):
-        return ", ".join(f"{m.mention} (strikes: {sc})" for m, sc in lst) if lst else "—"
+        return ", ".join(f"{m.mention} | {robux}R$ (strikes: {sc})" for m, sc, robux in lst) if lst else "—"
 
     def fmt_not_met(lst):
-        return "\n".join(f"{m.mention} — {t}/{WEEKLY_REQUIREMENT} tasks, {mins}/{WEEKLY_TIME_REQUIREMENT} mins (strikes: {sc})" for m, t, mins, sc in lst) if lst else "—"
+        return "\n".join(
+            f"{m.mention} | {robux}R$ — {t}/{WEEKLY_REQUIREMENT} tasks, {mins}/{WEEKLY_TIME_REQUIREMENT} mins (strikes: {sc})"
+            for m, t, mins, sc, robux in lst
+        ) if lst else "—"
 
     def fmt_zero(lst):
-        return ", ".join(f"{m.mention} (strikes: {sc})" for m, sc in lst) if lst else "—"
+        return ", ".join(f"{m.mention} | {robux}R$ (strikes: {sc})" for m, sc, robux in lst) if lst else "—"
 
     def fmt_excused(lst):
         return "\n".join(
@@ -2894,6 +2918,7 @@ async def check_weekly_tasks():
     summary += f"**❌ Below Quota ({len(not_met)}):**\n{fmt_not_met(not_met)}\n\n"
     summary += f"**🚫 0 Activity ({len(zero)}):**\n{fmt_zero(zero)}\n\n"
     summary += f"**🟦 Excused ({len(excused_members)}):**\n{fmt_excused(excused_members)}\n\n"
+    summary += "*Robux totals include base payouts from weekly logs. Recruitment +200 promotion bonuses must be manually verified by management.*\n\n"
     summary += "Weekly counts will now be reset."
 
     await send_long_embed(
@@ -2906,7 +2931,7 @@ async def check_weekly_tasks():
 
     # Issue strikes for not-met (if NOT excused)
     if not excused_reason:
-        for m, t, mins, _sc in not_met + [(m, 0, 0, sc) for m, sc in zero]:
+        for m, t, mins, _sc, _robux in not_met + [(m, 0, 0, sc, robux) for m, sc, robux in zero]:
             try:
                 if not m:
                     continue
