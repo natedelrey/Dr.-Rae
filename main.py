@@ -42,6 +42,7 @@ MEDICAL_STUDENT_ROLE_ID      = getenv_int("MEDICAL_STUDENT_ROLE_ID")
 ORIENTATION_ALERT_CHANNEL_ID = getenv_int("ORIENTATION_ALERT_CHANNEL_ID")
 COMMAND_LOG_CHANNEL_ID       = getenv_int("COMMAND_LOG_CHANNEL_ID", 1416965696230789150)
 ACTIVITY_LOG_CHANNEL_ID      = getenv_int("ACTIVITY_LOG_CHANNEL_ID", 1409646416829354095)
+ROBLOX_AUDIT_LOG_CHANNEL_ID  = getenv_int("ROBLOX_AUDIT_LOG_CHANNEL_ID", COMMAND_LOG_CHANNEL_ID)
 COMMS_CHANNEL_ID             = getenv_int("COMMS_CHANNEL_ID")
 APPLICATION_MANAGEMENT_CHANNEL_ID = 1405988167982649436
 
@@ -1108,11 +1109,12 @@ class MD_BOT(commands.Bot):
                 app = web.Application()
                 app.router.add_get('/health', lambda _: web.Response(text='ok', status=200))
                 app.router.add_post('/roblox', self.roblox_handler)
+                app.router.add_post('/roblox/audit', self.roblox_audit_handler)
                 self.web_runner = web.AppRunner(app)
                 await self.web_runner.setup()
                 self.web_site = web.TCPSite(self.web_runner, '0.0.0.0', 8080)
                 await self.web_site.start()
-                print("[Web] Server up on :8080 (GET /health, POST /roblox).")
+                print("[Web] Server up on :8080 (GET /health, POST /roblox, POST /roblox/audit).")
 
             # Sync slash commands once
             try:
@@ -1257,6 +1259,53 @@ class MD_BOT(commands.Bot):
                 )
 
         return web.Response(status=200)
+
+    async def roblox_audit_handler(self, request):
+        print("[/roblox/audit] hit")
+        if request.headers.get("X-Secret-Key") != API_SECRET_KEY:
+            print("[/roblox/audit] 401 bad secret")
+            return web.Response(status=401)
+
+        try:
+            data = await request.json()
+        except Exception:
+            return web.json_response({"ok": False, "error": "invalid_json"}, status=400)
+
+        event = str(data.get("event") or data.get("action") or data.get("eventType") or "Audit Event")
+        actor = str(data.get("actor") or data.get("author") or data.get("username") or "Unknown")
+        target = str(data.get("target") or data.get("recipient") or data.get("targetUser") or "Unknown")
+
+        amount = data.get("amount")
+        amount_text = f"{amount:,} R$" if isinstance(amount, int) else str(amount or "Unknown")
+        group_id = data.get("groupId") or ROBLOX_GROUP_ID or "Unknown"
+        reason = str(data.get("reason") or data.get("description") or "No reason provided")
+        occurred_at = str(data.get("timestamp") or data.get("createdAt") or utcnow().isoformat())
+
+        ch = bot.get_channel(ROBLOX_AUDIT_LOG_CHANNEL_ID) if ROBLOX_AUDIT_LOG_CHANNEL_ID else None
+        if not ch:
+            print("[/roblox/audit] no channel configured")
+            return web.json_response({"ok": False, "error": "channel_not_found"}, status=500)
+
+        embed = discord.Embed(
+            title="💸 Roblox Group Payout Logged",
+            color=discord.Color.gold(),
+            timestamp=utcnow(),
+        )
+        embed.add_field(name="Event", value=event[:1024], inline=True)
+        embed.add_field(name="Amount", value=amount_text[:1024], inline=True)
+        embed.add_field(name="Group", value=str(group_id)[:1024], inline=True)
+        embed.add_field(name="By", value=actor[:1024], inline=True)
+        embed.add_field(name="To", value=target[:1024], inline=True)
+        embed.add_field(name="Occurred", value=occurred_at[:1024], inline=False)
+        embed.add_field(name="Reason", value=reason[:1024], inline=False)
+
+        raw_payload = json.dumps(data, ensure_ascii=False)
+        if len(raw_payload) > 1024:
+            raw_payload = raw_payload[:1021] + "..."
+        embed.add_field(name="Payload", value=f"```json\n{raw_payload}\n```", inline=False)
+
+        await ch.send(embed=embed)
+        return web.json_response({"ok": True})
 
 
 bot = MD_BOT()
