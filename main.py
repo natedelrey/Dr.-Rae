@@ -2086,10 +2086,6 @@ class EmbedBuilderView(discord.ui.View):
             "fields": [],
         }
 
-    def _disable_view_items(self):
-        for item in self.children:
-            item.disabled = True
-
     def build_embed(self) -> discord.Embed:
         embed = discord.Embed(
             title=self.embed_data["title"] or None,
@@ -2114,7 +2110,7 @@ class EmbedBuilderView(discord.ui.View):
         await interaction.response.edit_message(embed=embed, view=self)
 
     async def on_timeout(self):
-        self._disable_view_items()
+        self.disable_all_items()
         if self.message:
             try:
                 await self.message.edit(view=self)
@@ -2158,7 +2154,7 @@ class EmbedBuilderView(discord.ui.View):
 
     @discord.ui.button(label="Cancel", style=discord.ButtonStyle.danger)
     async def cancel(self, interaction: discord.Interaction, _: discord.ui.Button):
-        self._disable_view_items()
+        self.disable_all_items()
         await interaction.response.edit_message(content="Embed builder closed.", embed=None, view=self)
 
 
