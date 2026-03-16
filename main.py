@@ -2707,6 +2707,65 @@ async def orientation_extend(interaction: discord.Interaction, member: discord.M
         ephemeral=True
     )
 
+@orientation_group.command(name="pending", description="(Mgmt) View Medical Students who have not passed orientation.")
+@app_commands.checks.has_role(MANAGEMENT_ROLE_ID)
+async def orientation_pending(interaction: discord.Interaction):
+    if not interaction.guild:
+        await interaction.response.send_message("This command can only be used in a server.", ephemeral=True)
+        return
+
+    if not MEDICAL_STUDENT_ROLE_ID:
+        await interaction.response.send_message("MEDICAL_STUDENT_ROLE_ID is not configured.", ephemeral=True)
+        return
+
+    student_role = interaction.guild.get_role(MEDICAL_STUDENT_ROLE_ID)
+    if not student_role:
+        await interaction.response.send_message("Could not find the configured Medical Student role in this server.", ephemeral=True)
+        return
+
+    students = list(student_role.members)
+    if not students:
+        await interaction.response.send_message("There are no members with the Medical Student role.", ephemeral=True)
+        return
+
+    ids = [m.id for m in students]
+    async with bot.db_pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT discord_id, deadline, passed FROM orientations WHERE discord_id = ANY($1::bigint[])",
+            ids,
+        )
+
+    by_id = {int(row["discord_id"]): row for row in rows}
+    pending_members: list[tuple[discord.Member, datetime.datetime | None]] = []
+
+    for member in students:
+        row = by_id.get(member.id)
+        if not row or not row["passed"]:
+            pending_members.append((member, row["deadline"] if row else None))
+
+    if not pending_members:
+        await interaction.response.send_message("All Medical Students have passed orientation. ✅", ephemeral=True)
+        await log_action("Orientation Pending Viewed", f"By: {interaction.user.mention}\nPending count: 0")
+        return
+
+    pending_members.sort(key=lambda item: item[1] or datetime.datetime.max.replace(tzinfo=datetime.timezone.utc))
+    lines = []
+    for member, deadline in pending_members:
+        if deadline:
+            remaining = human_remaining(deadline - utcnow())
+            deadline_text = f"{deadline.strftime('%Y-%m-%d %H:%M UTC')} ({remaining} remaining)"
+        else:
+            deadline_text = "No orientation record yet"
+        lines.append(f"- {member.mention} ({member.display_name}) — {deadline_text}")
+
+    header = f"**Pending orientation:** {len(pending_members)} member(s)"
+    chunks = smart_chunk("\n".join(lines), size=1700)
+    await interaction.response.send_message(f"{header}\n{chunks[0]}", ephemeral=True)
+    for chunk in chunks[1:]:
+        await interaction.followup.send(chunk, ephemeral=True)
+
+    await log_action("Orientation Pending Viewed", f"By: {interaction.user.mention}\nPending count: {len(pending_members)}")
+
 # ---------- Strikes ----------
 async def issue_strike(member: discord.Member, reason: str, *, set_by: int | None, auto: bool) -> int:
     now = utcnow()
