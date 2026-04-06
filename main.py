@@ -117,6 +117,7 @@ TASK_TYPES = [
     "Post-Op Interview",
     "Checkup",
     "Anomaly Checkup",
+    "Pharmacy",
     "Medical Department Recruitment",
 ]
 
@@ -133,6 +134,7 @@ TASK_ROBUX_PAYOUTS = {
     "Post-Op Interview": 20,
     "Checkup": 35,
     "Anomaly Checkup": 100,
+    "Pharmacy": 35,
     "Medical Department Recruitment": 5,  # +200 bonus is manually verified by management
 }
 
@@ -944,6 +946,14 @@ class MD_BOT(commands.Bot):
                     );
                 ''')
                 await connection.execute('''
+                    CREATE TABLE IF NOT EXISTS task_types (
+                        task_type TEXT PRIMARY KEY,
+                        enabled BOOLEAN NOT NULL DEFAULT TRUE,
+                        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                        updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+                    );
+                ''')
+                await connection.execute('''
                     CREATE TABLE IF NOT EXISTS roblox_verification (
                         discord_id BIGINT PRIMARY KEY,
                         roblox_id BIGINT UNIQUE
@@ -989,6 +999,16 @@ class MD_BOT(commands.Bot):
                 await connection.execute("ALTER TABLE task_logs ADD COLUMN IF NOT EXISTS task TEXT;")
                 await connection.execute("UPDATE weekly_task_logs SET task = COALESCE(task, task_type) WHERE task IS NULL;")
                 await connection.execute("UPDATE task_logs SET task = COALESCE(task, task_type) WHERE task IS NULL;")
+                await connection.executemany(
+                    '''
+                    INSERT INTO task_types (task_type, enabled)
+                    VALUES ($1, TRUE)
+                    ON CONFLICT (task_type) DO UPDATE
+                    SET enabled = EXCLUDED.enabled,
+                        updated_at = now()
+                    ''',
+                    [(task_type,) for task_type in TASK_TYPES]
+                )
                 await connection.execute("ALTER TABLE orientations ADD COLUMN IF NOT EXISTS passed_at TIMESTAMPTZ;")
                 await connection.execute("ALTER TABLE orientations ADD COLUMN IF NOT EXISTS warned_5d BOOLEAN DEFAULT FALSE;")
                 await connection.execute("ALTER TABLE orientations ADD COLUMN IF NOT EXISTS expired_handled BOOLEAN DEFAULT FALSE;")
@@ -2220,6 +2240,37 @@ async def announce(interaction: discord.Interaction, color: str = "blue"):
     await interaction.response.send_modal(AnnouncementForm(color_obj=color_obj))
 
 # ---------- Tasks ----------
+async def fetch_enabled_task_types() -> list[str]:
+    """Return enabled task types ordered for command autocompletes."""
+    if not bot.db_pool:
+        return list(TASK_TYPES)
+    async with bot.db_pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT task_type FROM task_types WHERE enabled = TRUE ORDER BY task_type ASC"
+        )
+    return [r["task_type"] for r in rows]
+
+
+async def task_type_autocomplete(
+    interaction: discord.Interaction,
+    current: str
+) -> list[app_commands.Choice[str]]:
+    del interaction
+    try:
+        task_types = await fetch_enabled_task_types()
+    except Exception:
+        task_types = list(TASK_TYPES)
+    current_lower = current.lower().strip()
+    filtered = [t for t in task_types if current_lower in t.lower()] if current_lower else task_types
+    return [app_commands.Choice(name=t, value=t) for t in filtered[:25]]
+
+
+async def is_valid_task_type(task_type: str) -> bool:
+    task_types = await fetch_enabled_task_types()
+    normalized = task_type.strip().casefold()
+    return any(t.casefold() == normalized for t in task_types)
+
+
 class LogTaskForm(discord.ui.Modal, title='Add Comments (optional)'):
     def __init__(self, proof: discord.Attachment, task_type: str):
         super().__init__()
@@ -2280,8 +2331,14 @@ class LogTaskForm(discord.ui.Modal, title='Add Comments (optional)'):
         )
 
 @tasks_group.command(name="log", description="Log a completed task with proof and type.")
-@app_commands.choices(task_type=[app_commands.Choice(name=t, value=t) for t in TASK_TYPES])
+@app_commands.autocomplete(task_type=task_type_autocomplete)
 async def tasks_log(interaction: discord.Interaction, task_type: str, proof: discord.Attachment):
+    if not await is_valid_task_type(task_type):
+        await interaction.response.send_message(
+            "That task type is not enabled. Ask management to add it first.",
+            ephemeral=True
+        )
+        return
     await interaction.response.send_modal(LogTaskForm(proof=proof, task_type=task_type))
 
 @tasks_group.command(name="my", description="Check your weekly tasks and time.")
@@ -2328,7 +2385,7 @@ async def tasks_member(interaction: discord.Interaction, member: discord.Member 
 
 @tasks_group.command(name="add", description="(Mgmt) Add tasks to a member's history and weekly totals.")
 @app_commands.checks.has_role(MANAGEMENT_ROLE_ID)
-@app_commands.choices(task_type=[app_commands.Choice(name=t, value=t) for t in TASK_TYPES])
+@app_commands.autocomplete(task_type=task_type_autocomplete)
 async def tasks_add(
     interaction: discord.Interaction,
     member: discord.Member,
@@ -2337,6 +2394,13 @@ async def tasks_add(
     comments: app_commands.Range[str, 0, 4000] | None = None,
     proof: discord.Attachment | None = None,
 ):
+    if not await is_valid_task_type(task_type):
+        await interaction.response.send_message(
+            "That task type is not enabled. Use `/tasks type_add` first.",
+            ephemeral=True
+        )
+        return
+
     now = utcnow()
     proof_url    = proof.url if proof else None
     comments_val = comments or "Added by management"
@@ -2378,6 +2442,80 @@ async def tasks_add(
         embed.set_image(url=proof_url)
 
     await log_action("Tasks Added", f"By: {interaction.user.mention}\nMember: {member.mention}\nType: **{task_type}** × {count}")
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+@tasks_group.command(name="type_add", description="(Mgmt) Add a task type that members can log.")
+@app_commands.checks.has_role(MANAGEMENT_ROLE_ID)
+async def tasks_type_add(interaction: discord.Interaction, task_type: app_commands.Range[str, 1, 80]):
+    cleaned = " ".join(task_type.split()).strip()
+    if not cleaned:
+        await interaction.response.send_message("Please provide a valid task type name.", ephemeral=True)
+        return
+
+    async with bot.db_pool.acquire() as conn:
+        exists = await conn.fetchval(
+            "SELECT 1 FROM task_types WHERE lower(task_type) = lower($1)",
+            cleaned
+        )
+        if exists:
+            await conn.execute(
+                "UPDATE task_types SET enabled = TRUE, updated_at = now() WHERE lower(task_type) = lower($1)",
+                cleaned
+            )
+            message = f"Enabled existing task type: **{cleaned}**."
+        else:
+            await conn.execute(
+                "INSERT INTO task_types (task_type, enabled) VALUES ($1, TRUE)",
+                cleaned
+            )
+            message = f"Added new task type: **{cleaned}**."
+
+    await log_action("Task Type Added", f"By: {interaction.user.mention}\nTask Type: **{cleaned}**")
+    await interaction.response.send_message(message, ephemeral=True)
+
+@tasks_group.command(name="type_remove", description="(Mgmt) Remove/disable a loggable task type.")
+@app_commands.checks.has_role(MANAGEMENT_ROLE_ID)
+@app_commands.autocomplete(task_type=task_type_autocomplete)
+async def tasks_type_remove(interaction: discord.Interaction, task_type: str):
+    if task_type.casefold() == "medical department recruitment":
+        await interaction.response.send_message(
+            "You can't disable Medical Department Recruitment because weekly payout logic depends on it.",
+            ephemeral=True
+        )
+        return
+
+    async with bot.db_pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT task_type, enabled FROM task_types WHERE lower(task_type) = lower($1)",
+            task_type
+        )
+        if not row:
+            await interaction.response.send_message("That task type does not exist.", ephemeral=True)
+            return
+        if not row["enabled"]:
+            await interaction.response.send_message("That task type is already disabled.", ephemeral=True)
+            return
+        await conn.execute(
+            "UPDATE task_types SET enabled = FALSE, updated_at = now() WHERE task_type = $1",
+            row["task_type"]
+        )
+
+    await log_action("Task Type Removed", f"By: {interaction.user.mention}\nTask Type: **{row['task_type']}**")
+    await interaction.response.send_message(f"Disabled task type: **{row['task_type']}**.", ephemeral=True)
+
+@tasks_group.command(name="type_list", description="List currently enabled task types.")
+async def tasks_type_list(interaction: discord.Interaction):
+    task_types = await fetch_enabled_task_types()
+    if not task_types:
+        await interaction.response.send_message("No task types are currently enabled.", ephemeral=True)
+        return
+    lines = "\n".join(f"• {t}" for t in task_types)
+    embed = discord.Embed(
+        title="🧾 Enabled Task Types",
+        description=lines,
+        color=discord.Color.blurple(),
+        timestamp=utcnow()
+    )
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 @tasks_group.command(name="leaderboard", description="Displays the weekly leaderboard (tasks + on-site minutes).")
