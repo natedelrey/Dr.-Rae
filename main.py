@@ -948,6 +948,7 @@ class MD_BOT(commands.Bot):
                     CREATE TABLE IF NOT EXISTS task_types (
                         task_type TEXT PRIMARY KEY,
                         enabled BOOLEAN NOT NULL DEFAULT TRUE,
+                        robux_value INT NOT NULL DEFAULT 0,
                         created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
                         updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
                     );
@@ -996,17 +997,19 @@ class MD_BOT(commands.Bot):
                 # Safety ALTERs for legacy DBs
                 await connection.execute("ALTER TABLE weekly_task_logs ADD COLUMN IF NOT EXISTS task TEXT;")
                 await connection.execute("ALTER TABLE task_logs ADD COLUMN IF NOT EXISTS task TEXT;")
+                await connection.execute("ALTER TABLE task_types ADD COLUMN IF NOT EXISTS robux_value INT NOT NULL DEFAULT 0;")
                 await connection.execute("UPDATE weekly_task_logs SET task = COALESCE(task, task_type) WHERE task IS NULL;")
                 await connection.execute("UPDATE task_logs SET task = COALESCE(task, task_type) WHERE task IS NULL;")
                 await connection.executemany(
                     '''
-                    INSERT INTO task_types (task_type, enabled)
-                    VALUES ($1, TRUE)
+                    INSERT INTO task_types (task_type, enabled, robux_value)
+                    VALUES ($1, TRUE, $2)
                     ON CONFLICT (task_type) DO UPDATE
                     SET enabled = EXCLUDED.enabled,
+                        robux_value = EXCLUDED.robux_value,
                         updated_at = now()
                     ''',
-                    [(task_type,) for task_type in TASK_TYPES]
+                    [(task_type, TASK_ROBUX_PAYOUTS.get(task_type, 0)) for task_type in TASK_TYPES]
                 )
                 await connection.execute("ALTER TABLE orientations ADD COLUMN IF NOT EXISTS passed_at TIMESTAMPTZ;")
                 await connection.execute("ALTER TABLE orientations ADD COLUMN IF NOT EXISTS warned_5d BOOLEAN DEFAULT FALSE;")
@@ -2230,6 +2233,17 @@ async def fetch_enabled_task_types() -> list[str]:
     return [r["task_type"] for r in rows]
 
 
+async def get_task_type_robux_map(enabled_only: bool = False) -> dict[str, int]:
+    query = "SELECT task_type, robux_value FROM task_types"
+    if enabled_only:
+        query += " WHERE enabled = TRUE"
+    if not bot.db_pool:
+        return {k.casefold(): v for k, v in TASK_ROBUX_PAYOUTS.items()}
+    async with bot.db_pool.acquire() as conn:
+        rows = await conn.fetch(query)
+    return {(r["task_type"] or "").casefold(): int(r["robux_value"] or 0) for r in rows}
+
+
 async def task_type_autocomplete(
     interaction: discord.Interaction,
     current: str
@@ -2344,21 +2358,26 @@ async def tasks_member(interaction: discord.Interaction, member: discord.Member 
             target.id,
         )
         total = await conn.fetchval("SELECT COUNT(*) FROM task_logs WHERE member_id = $1", target.id)
+    robux_map = await get_task_type_robux_map(enabled_only=False)
     if not rows:
         await interaction.response.send_message(f"No tasks found for {target.display_name}.", ephemeral=True)
         return
     lines = []
+    total_robux = 0
     for r in rows:
         base = r['ttype'] or "Uncategorized"
         label = TASK_PLURALS.get(base, base + ("s" if not base.endswith("s") else ""))
-        lines.append(f"**{label}** — {r['cnt']}")
+        robux_each = robux_map.get(base.casefold(), 0)
+        subtotal = robux_each * int(r['cnt'])
+        total_robux += subtotal
+        lines.append(f"**{label}** — {r['cnt']} *(R${robux_each} each · R${subtotal} total)*")
     embed = discord.Embed(
         title=f"🗂️ Task Totals for {target.display_name}",
         description="\n".join(lines),
         color=discord.Color.blurple(),
         timestamp=utcnow()
     )
-    embed.set_footer(text=f"Total tasks: {total}")
+    embed.set_footer(text=f"Total tasks: {total} • Estimated Robux: R${total_robux}")
     await log_action("Viewed Tasks", f"Requester: {interaction.user.mention}\nTarget: {target.mention if target != interaction.user else 'self'}")
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
@@ -2383,6 +2402,8 @@ async def tasks_add(
     now = utcnow()
     proof_url    = proof.url if proof else None
     comments_val = comments or "Added by management"
+    robux_map = await get_task_type_robux_map(enabled_only=False)
+    robux_each = robux_map.get(task_type.casefold(), TASK_ROBUX_PAYOUTS.get(task_type, 0))
 
     async with bot.db_pool.acquire() as conn:
         async with conn.transaction():
@@ -2415,7 +2436,12 @@ async def tasks_add(
         label = TASK_PLURALS.get(base, base + ("s" if not base.endswith("s") else ""))
         lines.append(f"{label} — {r['cnt']}")
 
-    desc = f"Added **{count}× {task_type}** to {member.mention}.\n\n**Now totals:**\n" + "\n".join(lines)
+    added_robux = int(robux_each) * int(count)
+    desc = (
+        f"Added **{count}× {task_type}** to {member.mention}.\n"
+        f"Estimated payout added: **R${added_robux}** *(R${robux_each} each)*.\n\n**Now totals:**\n"
+        + "\n".join(lines)
+    )
     embed = discord.Embed(title="✅ Tasks Added", description=desc, color=discord.Color.green(), timestamp=utcnow())
     if proof_url:
         embed.set_image(url=proof_url)
@@ -2425,7 +2451,11 @@ async def tasks_add(
 
 @tasks_group.command(name="type_add", description="(Mgmt) Add a task type that members can log.")
 @app_commands.checks.has_role(MANAGEMENT_ROLE_ID)
-async def tasks_type_add(interaction: discord.Interaction, task_type: app_commands.Range[str, 1, 80]):
+async def tasks_type_add(
+    interaction: discord.Interaction,
+    task_type: app_commands.Range[str, 1, 80],
+    robux_value: app_commands.Range[int, 0, 100000] = 0
+):
     cleaned = " ".join(task_type.split()).strip()
     if not cleaned:
         await interaction.response.send_message("Please provide a valid task type name.", ephemeral=True)
@@ -2438,18 +2468,18 @@ async def tasks_type_add(interaction: discord.Interaction, task_type: app_comman
         )
         if exists:
             await conn.execute(
-                "UPDATE task_types SET enabled = TRUE, updated_at = now() WHERE lower(task_type) = lower($1)",
-                cleaned
+                "UPDATE task_types SET enabled = TRUE, robux_value = $2, updated_at = now() WHERE lower(task_type) = lower($1)",
+                cleaned, int(robux_value)
             )
-            message = f"Enabled existing task type: **{cleaned}**."
+            message = f"Enabled existing task type: **{cleaned}** with payout **R${robux_value}**."
         else:
             await conn.execute(
-                "INSERT INTO task_types (task_type, enabled) VALUES ($1, TRUE)",
-                cleaned
+                "INSERT INTO task_types (task_type, enabled, robux_value) VALUES ($1, TRUE, $2)",
+                cleaned, int(robux_value)
             )
-            message = f"Added new task type: **{cleaned}**."
+            message = f"Added new task type: **{cleaned}** with payout **R${robux_value}**."
 
-    await log_action("Task Type Added", f"By: {interaction.user.mention}\nTask Type: **{cleaned}**")
+    await log_action("Task Type Added", f"By: {interaction.user.mention}\nTask Type: **{cleaned}**\nRobux: **R${robux_value}**")
     await interaction.response.send_message(message, ephemeral=True)
 
 @tasks_group.command(name="type_remove", description="(Mgmt) Remove/disable a loggable task type.")
@@ -2484,11 +2514,20 @@ async def tasks_type_remove(interaction: discord.Interaction, task_type: str):
 
 @tasks_group.command(name="type_list", description="List currently enabled task types.")
 async def tasks_type_list(interaction: discord.Interaction):
-    task_types = await fetch_enabled_task_types()
-    if not task_types:
+    if not bot.db_pool:
+        task_rows = [(t, TASK_ROBUX_PAYOUTS.get(t, 0)) for t in TASK_TYPES]
+    else:
+        async with bot.db_pool.acquire() as conn:
+            task_rows = await conn.fetch(
+                "SELECT task_type, robux_value FROM task_types WHERE enabled = TRUE ORDER BY task_type ASC"
+            )
+    if not task_rows:
         await interaction.response.send_message("No task types are currently enabled.", ephemeral=True)
         return
-    lines = "\n".join(f"• {t}" for t in task_types)
+    lines = "\n".join(
+        f"• {row[0] if isinstance(row, tuple) else row['task_type']} — **R${row[1] if isinstance(row, tuple) else int(row['robux_value'] or 0)}**"
+        for row in task_rows
+    )
     embed = discord.Embed(
         title="🧾 Enabled Task Types",
         description=lines,
