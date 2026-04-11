@@ -1535,16 +1535,8 @@ class ApplyView(discord.ui.View):
         prompt = question["prompt"]
         q_code = question["code"]
 
-        if question["type"] == "long":
-            modal = ApplicationModal(q_code, prompt, question.get("min_len", 0), question.get("max_len", 1000))
-            await interaction.response.send_modal(modal)
-            await modal.wait()
-            if not modal.answer:
-                return
-            self.answers[q_code] = modal.answer
-            await self._after_answer(interaction)
-            return
-
+        # Ask via ephemeral message so the full prompt is always visible.
+        # Modal titles/labels have strict character limits and can truncate long questions.
         await interaction.response.send_message(prompt, ephemeral=True)
         try:
             msg = await bot.wait_for(
