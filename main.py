@@ -85,12 +85,12 @@ ROBLOX_REMOVE_URL   = os.getenv("ROBLOX_REMOVE_URL") or None
 if ROBLOX_REMOVE_URL and not ROBLOX_REMOVE_URL.startswith("http"):
     ROBLOX_REMOVE_URL = "https://" + ROBLOX_REMOVE_URL
 ROBLOX_REMOVE_SECRET = os.getenv("ROBLOX_REMOVE_SECRET") or None
-ROBLOX_GROUP_ID      = os.getenv("ROBLOX_GROUP_ID") or None  # optional, forwarded if present
-ROBLOX_MEDICAL_DIVISION_URL = "https://www.roblox.com/communities/34445875/SCPF-Medical-Department#!/about"
+ROBLOX_GROUP_ID      = os.getenv("ROBLOX_GROUP_ID") or "745163328"  # optional, forwarded if present
+ROBLOX_MEDICAL_DIVISION_URL = "https://www.roblox.com/communities/745163328/Department-of-Medical-Sciences#!/about"
 
 APPLICATION_PENDING_WARNING = (
     "⚠️ **Reminder:** Ensure you have a pending join request for the "
-    f"[SCPF Medical Department Roblox group]({ROBLOX_MEDICAL_DIVISION_URL})."
+    f"[Department of Medical Sciences Roblox group]({ROBLOX_MEDICAL_DIVISION_URL})."
 )
 
 # Roblox rank configuration for automatic onboarding
@@ -118,7 +118,7 @@ TASK_TYPES = [
     "Checkup",
     "Anomaly Checkup",
     "Pharmacy",
-    "Medical Department Recruitment",
+    "Department of Medical Sciences Recruitment",
 ]
 
 TASK_PLURALS = {
@@ -126,7 +126,7 @@ TASK_PLURALS = {
     "Interview": "Interviews",
     "Post-Op Interview": "Post-Op Interviews",
     "Anomaly Checkup": "Anomaly Checkups",
-    "Medical Department Recruitment": "Medical Department Recruitments",
+    "Department of Medical Sciences Recruitment": "Department of Medical Sciences Recruitments",
 }
 
 TASK_ROBUX_PAYOUTS = {
@@ -135,7 +135,7 @@ TASK_ROBUX_PAYOUTS = {
     "Checkup": 35,
     "Anomaly Checkup": 100,
     "Pharmacy": 35,
-    "Medical Department Recruitment": 5,  # +200 bonus is manually verified by management
+    "Department of Medical Sciences Recruitment": 5,  # +200 bonus is manually verified by management
 }
 
 # === Application System Config ===
@@ -157,7 +157,7 @@ APPLICATION_QUESTIONS: list[dict[str, Any]] = [
     },
     {
         "code": "availability",
-        "prompt": "How many hours a week can you actively participate with the Medical Department? Be honest.",
+        "prompt": "How many hours a week can you actively participate with the Department of Medical Sciences? Be honest.",
         "type": "short",
         "required": True,
         "min_len": 1,
@@ -556,29 +556,27 @@ def find_member(discord_id: int) -> Optional[discord.Member]:
 def build_welcome_embed() -> discord.Embed:
     """Create the standard welcome embed used for new members."""
     msg = (
-        "Hello, congratulations on your acceptance to the **Medical Department!**\n\n"
-        ":one: Before you jump into anything, be sure that you familiarize yourself with the entirety of our central "
-        "[MD Trello](https://trello.com/b/j2jvme4Z/md-information-hub)\n"
-        "> :information_source: Even if you aren't specialized yet, it's good to know what each division does because "
-        "they individually focus on a critical component in your MD gameplay.\n\n"
-        ":two: After you've reviewed our guidelines, focus on getting your **Medical Student Orientation** completed. "
-        ":calendar_spiral: These are 30 minute sessions that have to be completed within your first 2 weeks of entry "
+        "Hello, congratulations on your acceptance to the **Department of Medical Sciences!**\n\n"
+        ":one: Before you jump into anything, be sure that you familiarize yourself with the entirety of our "
+        "[MD Trello](https://trello.com/b/j2jvme4Z/dms-information-hub) ! This contains critical information relevant "
+        "to your gameplay, and your journey as whole here in the DMS.\n\n"
+        ":two: After you've reviewed our guidelines, focus on getting your **Research Student Orientation** completed. "
+        ":calendar_spiral: These are 15 minute sessions that have to be completed within your first 2 weeks of entry "
         "and can be booked with any member of management, or you can complete one instantly through our "
         "[Automatic Training Center](https://www.roblox.com/games/135840468925158/Medical-Student-Orientation-Center).\n\n"
-        ":three: If you are interested in receiving **commission** for your medical duty :money_with_wings:, we offer a "
-        "[Medical Outreach Program](https://www.roblox.com/communities/451852407/SCPF-Outreach-Program#!/about) that conducts payouts.\n"
-        "> :information_source: If are applying to MD to receive the sign-on bonus, this is a critical step to ensure you "
-        "receive your payout.\n\n"
-        ":four: Familiarize yourself with myself—Dr. Rae! I will serve as your medical AI assistant throughout our journey, "
-        "and you'll have to learn a few of my important commands if you want to succeed. :checkered_flag: The first step we'll "
-        "take together is my **/verify command** with your ROBLOX username—this is to ensure your on-site activity is *always* "
-        "accurately tracked.\n\n"
+        ":three: If you are interested in receiving **commission** for your scientific duty :money_with_wings:, "
+        "we offer an [Outreach Program](https://www.roblox.com/communities/451852407/SCPF-Outreach-Program#!/about) "
+        "that conducts payouts.\n\n"
+        ":four: Familiarize yourself with myself—Dr. Rae! I will serve as your AI assistant throughout our journey, "
+        "and you'll have to learn a few of my important commands if you want to succeed. :checkered_flag: The first "
+        "step we'll take together is my **/verify command** with your ROBLOX username—this is to ensure your on-site "
+        "activity is *always* accurately tracked.\n\n"
         "That's all for now, if you have any questions at all just message any management member or even your peers! "
         "We're happy to have you here :sparkling_heart:"
     )
 
     embed = discord.Embed(title="Welcome to the Team!", description=msg, color=discord.Color(0x9CBADD))
-    embed.set_footer(text="Best,\nThe Medical Department Management Team")
+    embed.set_footer(text="Best,\nThe Department of Medical Sciences Management Team")
     return embed
 
 # === Roblox service helpers ===
@@ -758,7 +756,7 @@ class SimpleOpenAI:
         if not self.api_key:
             raise RuntimeError("Missing OPENAI_API_KEY for guidelines support.")
         system_prompt = (
-            "You are Dr. Rae, a friendly yet professional assistant for the SCPF Medical Department. "
+            "You are Dr. Rae, a friendly yet professional assistant for the Department of Medical Sciences. "
             "Rely exclusively on the provided guideline excerpts and any saved member background; treat them as your full "
             "knowledge base. "
             "If the excerpts do not contain the requested information, state that you are unsure and invite the member to "
@@ -815,7 +813,7 @@ class SimpleOpenAI:
         overall_score (0-100), verdict, dimension scores, rationale, flags[].
         """
         system = (
-            "You are a supportive reviewer for Medical Department applications. "
+            "You are a supportive reviewer for Department of Medical Sciences applications. "
             "Default to accepting applicants unless their answers clearly show trolling, rule-breaking, or an inability to participate. "
             "Output only valid JSON."
         )
@@ -1316,7 +1314,7 @@ class MD_BOT(commands.Bot):
 bot = MD_BOT()
 
 # Pre-create command groups (kept from your original)
-tasks_group = app_commands.Group(name="tasks", description="Commands for tracking Medical Department tasks.")
+tasks_group = app_commands.Group(name="tasks", description="Commands for tracking Department of Medical Sciences tasks.")
 orientation_group = app_commands.Group(name="orientation", description="Manage member orientation progress.")
 strikes_group = app_commands.Group(name="strikes", description="Manage member strikes.")
 # === Events ===
@@ -1435,7 +1433,7 @@ class ApplyView(discord.ui.View):
         return f"[{bar}] ({self.current_index}/{self.total_questions})"
 
     def _base_message(self) -> str:
-        header = "**Medical Department Application**"
+        header = "**Department of Medical Sciences Application**"
         progress = f"Progress: {self._progress_bar()}"
         if self.stage == "review":
             body = (
@@ -1833,7 +1831,7 @@ async def handle_accept(interaction: discord.Interaction, discord_id: int, answe
     comms = bot.get_channel(COMMS_CHANNEL_ID) if COMMS_CHANNEL_ID else None
     if comms:
         try:
-            await comms.send(content=f"🎉 Please welcome {member.mention} to the **Medical Department**!", embed=build_welcome_embed())
+            await comms.send(content=f"🎉 Please welcome {member.mention} to the **Department of Medical Sciences**!", embed=build_welcome_embed())
         except Exception as e:
             print(f"Failed to send welcome: {e}")
 
@@ -1888,7 +1886,7 @@ async def handle_reject(interaction, discord_id, score, rationale, run_id):
     if member:
         try:
             await member.send(
-                f"Hello — thank you for applying to the **Medical Department**, but unfortunately your application has not been accepted.\n\n"
+                f"Hello — thank you for applying to the **Department of Medical Sciences**, but unfortunately your application has not been accepted.\n\n"
                 f"**Score:** {score:.1f}\nReasoning:\n> {rationale[:500]}"
             )
         except:
@@ -1906,7 +1904,7 @@ async def handle_reject(interaction, discord_id, score, rationale, run_id):
     await interaction.followup.send("❌ Application rejected.", ephemeral=True)
 
 # /apply command
-@bot.tree.command(name="apply", description="Begin your Medical Department application.")
+@bot.tree.command(name="apply", description="Begin your Department of Medical Sciences application.")
 async def apply(interaction: discord.Interaction):
     # Cooldown check
     async with bot.db_pool.acquire() as conn:
@@ -2488,7 +2486,7 @@ async def tasks_type_add(
 async def tasks_type_remove(interaction: discord.Interaction, task_type: str):
     if task_type.casefold() == "medical department recruitment":
         await interaction.response.send_message(
-            "You can't disable Medical Department Recruitment because weekly payout logic depends on it.",
+            "You can't disable Department of Medical Sciences Recruitment because weekly payout logic depends on it.",
             ephemeral=True
         )
         return
@@ -2948,7 +2946,7 @@ async def issue_strike(member: discord.Member, reason: str, *, set_by: int | Non
 
 async def enforce_three_strikes(member: discord.Member):
     try:
-        await member.send("You've been automatically removed from the Medical Department for reaching **3/3 strikes**.")
+        await member.send("You've been automatically removed from the Department of Medical Sciences for reaching **3/3 strikes**.")
     except:
         pass
 
@@ -3155,9 +3153,9 @@ async def orientation_reminder_loop():
                 if member:
                     try:
                         await member.send(
-                            "Hi — this is an automatic notice from the Medical Department.\n\n"
+                            "Hi — this is an automatic notice from the Department of Medical Sciences.\n\n"
                             "Your **2-week orientation deadline** has passed and you have been **removed** due to not completing orientation in time.\n"
-                            "If this is a mistake, please contact MD Management."
+                            "If this is a mistake, please contact DMS Management."
                         )
                     except:
                         pass
