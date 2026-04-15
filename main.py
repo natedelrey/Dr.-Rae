@@ -2831,6 +2831,41 @@ async def orientation_view(interaction: discord.Interaction, member: discord.Mem
     await log_action("Orientation Viewed", f"Requester: {interaction.user.mention}\nTarget: {target.mention if target != interaction.user else 'self'}")
     await interaction.response.send_message(msg, ephemeral=True)
 
+@bot.tree.command(name="payoutlog", description="(Management) Post a Roblox payout/audit entry to the log channel.")
+@app_commands.checks.has_role(MANAGEMENT_ROLE_ID)
+async def payoutlog(
+    interaction: discord.Interaction,
+    recipient: str,
+    amount: int,
+    reason: str,
+    event: str = "Group Payout",
+):
+    ch = bot.get_channel(ROBLOX_AUDIT_LOG_CHANNEL_ID) if ROBLOX_AUDIT_LOG_CHANNEL_ID else None
+    if not ch:
+        await interaction.response.send_message(
+            "Audit log channel is not configured or not accessible.",
+            ephemeral=True
+        )
+        return
+
+    embed = discord.Embed(
+        title="💸 Roblox Group Payout Logged",
+        color=discord.Color.gold(),
+        timestamp=utcnow(),
+    )
+    embed.add_field(name="Event", value=event[:1024], inline=True)
+    embed.add_field(name="Amount", value=f"{amount:,} R$", inline=True)
+    embed.add_field(name="By", value=interaction.user.mention, inline=True)
+    embed.add_field(name="To", value=recipient[:1024], inline=True)
+    embed.add_field(name="Reason", value=reason[:1024], inline=False)
+
+    await ch.send(embed=embed)
+    await log_action(
+        "Payout Logged",
+        f"By: {interaction.user.mention}\nTo: **{recipient}**\nAmount: **{amount:,} R$**\nReason: {reason}"
+    )
+    await interaction.response.send_message("Payout log sent.", ephemeral=True)
+
 @orientation_group.command(name="extend", description="(Mgmt) Extend a member's orientation deadline by N days.")
 @app_commands.checks.has_role(MANAGEMENT_ROLE_ID)
 async def orientation_extend(interaction: discord.Interaction, member: discord.Member, days: app_commands.Range[int, 1, 60], reason: str | None = None):
