@@ -3026,13 +3026,6 @@ async def check_weekly_tasks():
             "SELECT member_id, COALESCE(NULLIF(task_type, ''), task) AS ttype, COUNT(*) AS cnt "
             "FROM weekly_task_logs GROUP BY member_id, ttype"
         )
-        # Pull active strikes counts for all dept members
-        strike_counts = {
-            r['member_id']: r['cnt'] for r in await conn.fetch(
-                "SELECT member_id, COUNT(*) as cnt FROM strikes WHERE expires_at > $1 GROUP BY member_id",
-                now
-            )
-        }
 
     tasks_map = {r['member_id']: r['tasks_completed'] for r in all_tasks if r['member_id'] in dept_member_ids}
     time_map = {r['member_id']: r['time_spent'] for r in all_time if r['member_id'] in dept_member_ids}
@@ -3054,31 +3047,32 @@ async def check_weekly_tasks():
         tasks_done = tasks_map.get(member_id, 0)
         time_done_minutes = (time_map.get(member_id, 0)) // 60
         robux_total = robux_map.get(member_id, 0)
-        sc = strike_counts.get(member_id, 0)
         if tasks_done >= WEEKLY_REQUIREMENT and time_done_minutes >= WEEKLY_TIME_REQUIREMENT:
-            met.append((member, sc, robux_total))
+            met.append((member, tasks_done, time_done_minutes, robux_total))
         else:
-            not_met.append((member, tasks_done, time_done_minutes, sc, robux_total))
+            not_met.append((member, tasks_done, time_done_minutes, robux_total))
 
     zero_ids = dept_member_ids - considered_ids
     for mid in zero_ids:
         member = guild.get_member(mid)
         if member:
-            sc = strike_counts.get(mid, 0)
-            zero.append((member, sc, robux_map.get(mid, 0)))
+            zero.append((member, robux_map.get(mid, 0)))
 
     # Post report
     def fmt_met(lst):
-        return ", ".join(f"{m.mention} | {robux}R$ (strikes: {sc})" for m, sc, robux in lst) if lst else "—"
+        return "\n".join(
+            f"• {m.mention} | {robux}R$ — {t}/{WEEKLY_REQUIREMENT} tasks, {mins}/{WEEKLY_TIME_REQUIREMENT} mins"
+            for m, t, mins, robux in lst
+        ) if lst else "—"
 
     def fmt_not_met(lst):
         return "\n".join(
-            f"{m.mention} | {robux}R$ — {t}/{WEEKLY_REQUIREMENT} tasks, {mins}/{WEEKLY_TIME_REQUIREMENT} mins (strikes: {sc})"
-            for m, t, mins, sc, robux in lst
+            f"• {m.mention} | {robux}R$ — {t}/{WEEKLY_REQUIREMENT} tasks, {mins}/{WEEKLY_TIME_REQUIREMENT} mins"
+            for m, t, mins, robux in lst
         ) if lst else "—"
 
     def fmt_zero(lst):
-        return ", ".join(f"{m.mention} | {robux}R$ (strikes: {sc})" for m, sc, robux in lst) if lst else "—"
+        return "\n".join(f"• {m.mention} | {robux}R$" for m, robux in lst) if lst else "—"
 
     summary = (
         f"--- Weekly Task Report (**{wk}**) ---\n"
