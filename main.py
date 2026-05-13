@@ -1992,7 +1992,7 @@ async def apply(interaction: discord.Interaction):
 @app_commands.checks.has_role(MANAGEMENT_ROLE_ID)
 async def blacklist(
     interaction: discord.Interaction,
-    user: discord.Member,
+    user: discord.User,
     roblox_username: str,
     reason: str,
 ):
@@ -2019,7 +2019,7 @@ async def blacklist(
 
 @bot.tree.command(name="unblacklist", description="(Mgmt) Remove someone from the AI application blacklist.")
 @app_commands.checks.has_role(MANAGEMENT_ROLE_ID)
-async def unblacklist(interaction: discord.Interaction, user: discord.Member):
+async def unblacklist(interaction: discord.Interaction, user: discord.User):
     async with bot.db_pool.acquire() as conn:
         deleted = await conn.execute("DELETE FROM application_blacklist WHERE discord_id=$1", user.id)
     if deleted.endswith("0"):
