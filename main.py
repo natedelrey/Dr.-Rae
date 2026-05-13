@@ -45,6 +45,7 @@ ACTIVITY_LOG_CHANNEL_ID      = getenv_int("ACTIVITY_LOG_CHANNEL_ID", 14096464168
 ROBLOX_AUDIT_LOG_CHANNEL_ID  = getenv_int("ROBLOX_AUDIT_LOG_CHANNEL_ID", COMMAND_LOG_CHANNEL_ID)
 COMMS_CHANNEL_ID             = getenv_int("COMMS_CHANNEL_ID")
 APPLICATION_MANAGEMENT_CHANNEL_ID = 1405988167982649436
+APPLICATION_BLACKLIST_LOG_CHANNEL_ID = 1503914526989488128
 
 # Extra roles to grant on successful application
 APPLICATION_EXTRA_ROLE_IDS = [
@@ -1094,6 +1095,17 @@ class MD_BOT(commands.Bot):
                         created_at TIMESTAMPTZ DEFAULT now()
                     );
                 ''')
+                await connection.execute('''
+                    CREATE TABLE IF NOT EXISTS application_blacklist (
+                        id BIGSERIAL PRIMARY KEY,
+                        discord_id BIGINT UNIQUE NOT NULL,
+                        discord_username TEXT,
+                        roblox_username TEXT,
+                        reason TEXT NOT NULL,
+                        blacklisted_by BIGINT NOT NULL,
+                        blacklisted_at TIMESTAMPTZ DEFAULT now()
+                    );
+                ''')
 
                 # Seed/refresh "questions" ordering to match APPLICATION_QUESTIONS
                 for idx, q in enumerate(APPLICATION_QUESTIONS):
@@ -1626,6 +1638,44 @@ class ApplyView(discord.ui.View):
                 ephemeral=True,
             )
 
+            async with bot.db_pool.acquire() as conn:
+                blacklist_row = await conn.fetchrow(
+                    "SELECT reason, blacklisted_by FROM application_blacklist WHERE discord_id=$1",
+                    self.user_id,
+                )
+
+            if blacklist_row:
+                reason = str(blacklist_row["reason"])[:500]
+                blacklisted_by = int(blacklist_row["blacklisted_by"])
+                async with bot.db_pool.acquire() as conn:
+                    await conn.execute(
+                        "INSERT INTO decisions (run_id, decided_by, decision, reason) VALUES ($1,$2,$3,$4)",
+                        run_id, f"blacklist:{blacklisted_by}", "reject", f"BLACKLISTED: {reason}"
+                    )
+                    await conn.execute(
+                        "UPDATE applicants SET status='rejected', cooldown_until = (now() + ($1 * interval '1 hour')), updated_at=now() WHERE discord_id=$2",
+                        APPLICATION_COOLDOWN_HOURS, self.user_id
+                    )
+
+                management_channel = bot.get_channel(APPLICATION_MANAGEMENT_CHANNEL_ID)
+                if management_channel:
+                    await management_channel.send(
+                        f"🚫 Blacklisted applicant detected: <@{self.user_id}> (`{self.user_id}`)\n"
+                        f"Do not accept this application. Blacklist reason: {reason}\n"
+                        f"Blacklisted by: <@{blacklisted_by}>"
+                    )
+
+                await interaction.followup.send(
+                    "⚠️ Your application needs further review by management.",
+                    ephemeral=True,
+                )
+                self.stage = "completed"
+                self.next.label = "Submitted"
+                self.next.disabled = True
+                self.next.style = discord.ButtonStyle.gray
+                await interaction.edit_original_response(content=self._base_message(), view=self)
+                return
+
             try:
                 result = await bot.ai.score_application(self.answers)
             except Exception as e:
@@ -1895,6 +1945,23 @@ async def handle_reject(interaction, discord_id, score, rationale, run_id):
     await log_action("Application Rejected", f"User: <@{discord_id}> | Score: {score:.1f}")
     await interaction.followup.send("❌ Application rejected.", ephemeral=True)
 
+
+async def send_blacklist_embed(*, discord_id: int, discord_username: str, roblox_username: str, reason: str, blacklisted_by: int):
+    channel = bot.get_channel(APPLICATION_BLACKLIST_LOG_CHANNEL_ID)
+    if not channel:
+        return
+    embed = discord.Embed(
+        title="🚫 Application Blacklist Updated",
+        description="A user has been blacklisted from AI application approval.",
+        color=discord.Color.red(),
+        timestamp=utcnow(),
+    )
+    embed.add_field(name="Discord", value=f"{discord_username} (`{discord_id}`)", inline=False)
+    embed.add_field(name="Roblox Username", value=roblox_username or "Not provided", inline=False)
+    embed.add_field(name="Reason", value=reason[:1024], inline=False)
+    embed.add_field(name="Blacklisted By", value=f"<@{blacklisted_by}> (`{blacklisted_by}`)", inline=False)
+    await channel.send(embed=embed)
+
 # /apply command
 @bot.tree.command(name="apply", description="Begin your Department of Medical Sciences application.")
 async def apply(interaction: discord.Interaction):
@@ -1920,6 +1987,66 @@ async def apply(interaction: discord.Interaction):
         view=view,
         ephemeral=True
     )
+
+@bot.tree.command(name="blacklist", description="(Mgmt) Block someone from passing AI applications.")
+@app_commands.checks.has_role(MANAGEMENT_ROLE_ID)
+async def blacklist(
+    interaction: discord.Interaction,
+    user: discord.Member,
+    roblox_username: str,
+    reason: str,
+):
+    async with bot.db_pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO application_blacklist (discord_id, discord_username, roblox_username, reason, blacklisted_by, blacklisted_at) "
+            "VALUES ($1,$2,$3,$4,$5,now()) "
+            "ON CONFLICT (discord_id) DO UPDATE SET discord_username=EXCLUDED.discord_username, roblox_username=EXCLUDED.roblox_username, reason=EXCLUDED.reason, blacklisted_by=EXCLUDED.blacklisted_by, blacklisted_at=EXCLUDED.blacklisted_at",
+            user.id,
+            str(user),
+            roblox_username.strip(),
+            reason.strip(),
+            interaction.user.id,
+        )
+    await send_blacklist_embed(
+        discord_id=user.id,
+        discord_username=str(user),
+        roblox_username=roblox_username.strip(),
+        reason=reason.strip(),
+        blacklisted_by=interaction.user.id,
+    )
+    await interaction.response.send_message(f"✅ {user.mention} has been blacklisted from AI app approvals.", ephemeral=True)
+
+
+@bot.tree.command(name="unblacklist", description="(Mgmt) Remove someone from the AI application blacklist.")
+@app_commands.checks.has_role(MANAGEMENT_ROLE_ID)
+async def unblacklist(interaction: discord.Interaction, user: discord.Member):
+    async with bot.db_pool.acquire() as conn:
+        deleted = await conn.execute("DELETE FROM application_blacklist WHERE discord_id=$1", user.id)
+    if deleted.endswith("0"):
+        await interaction.response.send_message("That user is not blacklisted.", ephemeral=True)
+        return
+    await interaction.response.send_message(f"✅ Removed {user.mention} from blacklist.", ephemeral=True)
+
+
+@bot.tree.command(name="blacklists", description="(Mgmt) View all AI application blacklists.")
+@app_commands.checks.has_role(MANAGEMENT_ROLE_ID)
+async def blacklists(interaction: discord.Interaction):
+    async with bot.db_pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT discord_id, discord_username, roblox_username, reason, blacklisted_by, blacklisted_at "
+            "FROM application_blacklist ORDER BY blacklisted_at DESC"
+        )
+    if not rows:
+        await interaction.response.send_message("No users are currently blacklisted.", ephemeral=True)
+        return
+    lines = []
+    for row in rows:
+        lines.append(
+            f"• **{row['discord_username'] or row['discord_id']}** (`{row['discord_id']}`) | "
+            f"Roblox: `{row['roblox_username'] or 'N/A'}` | By: <@{row['blacklisted_by']}>\n"
+            f"  Reason: {row['reason']}"
+        )
+    await interaction.response.send_message("\n".join(lines)[:1900], ephemeral=True)
 
 # === PART 2/3 END ===
 # Reply "next" to receive PART 3/3 — remaining commands (tasks/orientation/strikes/excuses), loops, /rank, and bot.run().
