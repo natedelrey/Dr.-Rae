@@ -95,7 +95,7 @@ APPLICATION_PENDING_WARNING = (
 )
 
 # Roblox rank configuration for automatic onboarding
-AUTO_ACCEPT_GROUP_ROLE_NAME   = os.getenv("AUTO_ACCEPT_GROUP_ROLE_NAME") or "Medical Student"
+AUTO_ACCEPT_GROUP_ROLE_NAME   = os.getenv("AUTO_ACCEPT_GROUP_ROLE_NAME") or "Associate"
 
 # Rank manager role (can run /rank)
 RANK_MANAGER_ROLE_ID = getenv_int("RANK_MANAGER_ROLE_ID", 1405979816120942702)
