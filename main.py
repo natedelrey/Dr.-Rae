@@ -3361,8 +3361,8 @@ async def evaluate_promotion(member: discord.Member) -> tuple[str | None, str]:
         return "Practitioner", "Specimen Testing + Surgery complete, 25+ total tasks, 42+ days in department, and no strikes in the last 30 days."
     if anomaly_test_count >= 1 and interview_count >= 1 and pharmacy_count >= 1 and anomaly_checkup_count >= 1 and weeks_active >= 2 and days_in_dept >= 14:
         return "Researcher", "Completed Anomaly Test, Interview, Pharmacy Counter Duty, and Anomaly Check-Up with 2+ active weeks and 14+ days in department."
-    if passed_orientation and assoc_req_count >= 1 and days_in_dept >= 14:
-        return "Assistant Researcher", "Passed orientation and completed at least one supervised/check-up task in the 2-week period."
+    if passed_orientation and assoc_req_count >= 1:
+        return "Assistant Researcher", "Passed orientation and completed at least one supervised/check-up task."
     return None, ""
 
 
