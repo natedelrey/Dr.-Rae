@@ -44,6 +44,7 @@ COMMAND_LOG_CHANNEL_ID       = getenv_int("COMMAND_LOG_CHANNEL_ID", 141696569623
 ACTIVITY_LOG_CHANNEL_ID      = getenv_int("ACTIVITY_LOG_CHANNEL_ID", 1409646416829354095)
 ROBLOX_AUDIT_LOG_CHANNEL_ID  = getenv_int("ROBLOX_AUDIT_LOG_CHANNEL_ID", COMMAND_LOG_CHANNEL_ID)
 COMMS_CHANNEL_ID             = getenv_int("COMMS_CHANNEL_ID")
+PROMOTION_ALERT_CHANNEL_ID   = getenv_int("PROMOTION_ALERT_CHANNEL_ID")
 APPLICATION_MANAGEMENT_CHANNEL_ID = 1405988167982649436
 APPLICATION_BLACKLIST_LOG_CHANNEL_ID = 1503914526989488128
 
@@ -138,6 +139,18 @@ TASK_ROBUX_PAYOUTS = {
     "Pharmacy": 35,
     "Department of Medical Sciences Recruitment": 5,  # +200 bonus is manually verified by management
 }
+
+PROMOTION_TASK_ALIASES = {
+    "associate_checkup": {"checkup", "anomaly checkup"},
+    "anomaly_test": {"anomaly test"},
+    "interview": {"interview"},
+    "pharmacy_counter_duty": {"pharmacy", "pharmacy counter duty"},
+    "anomaly_checkup": {"anomaly checkup"},
+    "specimen_testing": {"specimen testing"},
+    "surgery": {"surgery"},
+}
+
+PROMOTION_RANK_ORDER = ["Associate", "Assistant Researcher", "Researcher", "Practitioner", "Research Advisor"]
 
 # === Application System Config ===
 APPLICATION_AUTO_ACCEPT_THRESHOLD = float(os.getenv("APPLICATION_AUTO_ACCEPT_THRESHOLD", "55"))
@@ -2439,6 +2452,7 @@ class LogTaskForm(discord.ui.Modal, title='Add Comments (optional)'):
             f"Your task has been logged! You have completed {tasks_completed} task(s) this week.",
             ephemeral=True
         )
+        await maybe_send_promotion_alert(interaction.user)
 
 @tasks_group.command(name="log", description="Log a completed task with proof and type.")
 @app_commands.autocomplete(task_type=task_type_autocomplete)
@@ -2565,6 +2579,7 @@ async def tasks_add(
 
     await log_action("Tasks Added", f"By: {interaction.user.mention}\nMember: {member.mention}\nType: **{task_type}** × {count}")
     await interaction.response.send_message(embed=embed, ephemeral=True)
+    await maybe_send_promotion_alert(member)
 
 @tasks_group.command(name="type_add", description="(Mgmt) Add a task type that members can log.")
 @app_commands.checks.has_role(MANAGEMENT_ROLE_ID)
@@ -3297,6 +3312,108 @@ async def before_orientation_loop():
     await bot.wait_until_ready()
 
 # ---------- /rank with autocomplete ----------
+def _normalize_label(value: str | None) -> str:
+    return " ".join((value or "").replace("-", " ").split()).strip().casefold()
+
+
+async def _count_matching_tasks(conn: asyncpg.Connection, member_id: int, labels: set[str]) -> int:
+    rows = await conn.fetch("SELECT COALESCE(NULLIF(task_type, ''), task) AS ttype FROM task_logs WHERE member_id = $1", member_id)
+    return sum(1 for r in rows if _normalize_label(r["ttype"]) in labels)
+
+
+async def evaluate_promotion(member: discord.Member) -> tuple[str | None, str]:
+    now = utcnow()
+    async with bot.db_pool.acquire() as conn:
+        assigned_at = await conn.fetchval("SELECT assigned_at FROM orientations WHERE discord_id=$1", member.id)
+        passed_orientation = await conn.fetchval("SELECT passed FROM orientations WHERE discord_id=$1", member.id) or False
+        total_tasks = await conn.fetchval("SELECT COUNT(*) FROM task_logs WHERE member_id=$1", member.id) or 0
+        strikes_30 = await conn.fetchval("SELECT COUNT(*) FROM strikes WHERE member_id=$1 AND issued_at >= $2", member.id, now - datetime.timedelta(days=30)) or 0
+        strikes_60 = await conn.fetchval("SELECT COUNT(*) FROM strikes WHERE member_id=$1 AND issued_at >= $2", member.id, now - datetime.timedelta(days=60)) or 0
+        week_rows = await conn.fetch("SELECT DISTINCT to_char(timestamp, 'IYYY-IW') AS week FROM task_logs WHERE member_id=$1", member.id)
+        weeks_active = len([r["week"] for r in week_rows if r["week"]])
+        assoc_req_count = await _count_matching_tasks(conn, member.id, PROMOTION_TASK_ALIASES["associate_checkup"])
+        anomaly_test_count = await _count_matching_tasks(conn, member.id, PROMOTION_TASK_ALIASES["anomaly_test"])
+        interview_count = await _count_matching_tasks(conn, member.id, PROMOTION_TASK_ALIASES["interview"])
+        pharmacy_count = await _count_matching_tasks(conn, member.id, PROMOTION_TASK_ALIASES["pharmacy_counter_duty"])
+        anomaly_checkup_count = await _count_matching_tasks(conn, member.id, PROMOTION_TASK_ALIASES["anomaly_checkup"])
+        specimen_count = await _count_matching_tasks(conn, member.id, PROMOTION_TASK_ALIASES["specimen_testing"])
+        surgery_count = await _count_matching_tasks(conn, member.id, PROMOTION_TASK_ALIASES["surgery"])
+    days_in_dept = (now - assigned_at).days if assigned_at else 0
+    if weeks_active >= 16 and days_in_dept >= 120 and strikes_60 == 0:
+        return "Research Advisor", "16+ active weeks, 120+ days in department, and no disciplinary action in the last 60 days."
+    if specimen_count >= 1 and surgery_count >= 1 and total_tasks >= 25 and days_in_dept >= 42 and strikes_30 == 0:
+        return "Practitioner", "Specimen Testing + Surgery complete, 25+ total tasks, 42+ days in department, and no strikes in the last 30 days."
+    if anomaly_test_count >= 1 and interview_count >= 1 and pharmacy_count >= 1 and anomaly_checkup_count >= 1 and weeks_active >= 2 and days_in_dept >= 14:
+        return "Researcher", "Completed Anomaly Test, Interview, Pharmacy Counter Duty, and Anomaly Check-Up with 2+ active weeks and 14+ days in department."
+    if passed_orientation and assoc_req_count >= 1 and days_in_dept >= 14:
+        return "Assistant Researcher", "Passed orientation and completed at least one supervised/check-up task in the 2-week period."
+    return None, ""
+
+
+class PromotionAlertView(discord.ui.View):
+    def __init__(self, member_id: int, target_rank: str):
+        super().__init__(timeout=None)
+        self.member_id = member_id
+        self.target_rank = target_rank
+
+    @discord.ui.button(label="Auto-Rank", style=discord.ButtonStyle.success, emoji="⬆️")
+    async def auto_rank(self, interaction: discord.Interaction, button: discord.ui.Button):
+        del button
+        if MANAGEMENT_ROLE_ID and not any(r.id == MANAGEMENT_ROLE_ID for r in interaction.user.roles):
+            await interaction.response.send_message("You need management permissions to auto-rank.", ephemeral=True)
+            return
+        member = interaction.guild.get_member(self.member_id) if interaction.guild else None
+        if not member:
+            await interaction.response.send_message("Member is no longer in this server.", ephemeral=True)
+            return
+        roblox_id = await bot.get_roblox_id(member.id)
+        if not roblox_id:
+            await interaction.response.send_message("Member is not Roblox-verified.", ephemeral=True)
+            return
+        ranks = await fetch_group_ranks()
+        target = next((r for r in ranks if _normalize_label(r.get("name")) == _normalize_label(self.target_rank)), None)
+        if not target:
+            await interaction.response.send_message(f"Could not find Roblox rank '{self.target_rank}'.", ephemeral=True)
+            return
+        ok = await set_group_rank(int(roblox_id), role_id=int(target["id"]))
+        if not ok:
+            await interaction.response.send_message("Failed to update Roblox rank.", ephemeral=True)
+            return
+        async with bot.db_pool.acquire() as conn:
+            await conn.execute(
+                "INSERT INTO member_ranks (discord_id, rank, set_by, set_at) VALUES ($1, $2, $3, $4) "
+                "ON CONFLICT (discord_id) DO UPDATE SET rank = EXCLUDED.rank, set_by = EXCLUDED.set_by, set_at = EXCLUDED.set_at",
+                member.id, target["name"], interaction.user.id, utcnow()
+            )
+        for role in member.guild.roles:
+            if _normalize_label(role.name) == _normalize_label(target["name"]):
+                await member.add_roles(role, reason=f"Auto-ranked via promotion alert by {interaction.user}")
+                break
+        await interaction.response.send_message(f"✅ Ranked {member.mention} to **{target['name']}**.", ephemeral=True)
+
+
+async def maybe_send_promotion_alert(member: discord.Member):
+    if not PROMOTION_ALERT_CHANNEL_ID or not bot.db_pool:
+        return
+    target_rank, requirement_text = await evaluate_promotion(member)
+    if not target_rank:
+        return
+    current_rank = await bot.resolve_member_rank(member)
+    cur_idx = PROMOTION_RANK_ORDER.index(current_rank) if current_rank in PROMOTION_RANK_ORDER else -1
+    target_idx = PROMOTION_RANK_ORDER.index(target_rank)
+    if target_idx <= cur_idx:
+        return
+    channel = bot.get_channel(PROMOTION_ALERT_CHANNEL_ID)
+    if not channel:
+        return
+    embed = discord.Embed(
+        title="🌸 Promotion Requirement Met",
+        description=f"{member.mention} has reach the promotion requirements for **{target_rank}**!\n\nPlease review the requirements of ({requirement_text}).",
+        color=discord.Color.pink(),
+        timestamp=utcnow(),
+    )
+    await channel.send(embed=embed, view=PromotionAlertView(member.id, target_rank))
+
 async def group_role_autocomplete(interaction: discord.Interaction, current: str):
     current_lower = (current or "").lower()
     roles = await fetch_group_ranks()
