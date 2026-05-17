@@ -3405,6 +3405,13 @@ async def maybe_send_promotion_alert(member: discord.Member):
         return
     channel = bot.get_channel(PROMOTION_ALERT_CHANNEL_ID)
     if not channel:
+        try:
+            channel = await bot.fetch_channel(PROMOTION_ALERT_CHANNEL_ID)
+        except Exception as e:
+            print(f"[promotion-alert] Failed to fetch channel {PROMOTION_ALERT_CHANNEL_ID}: {e}")
+            return
+    if not isinstance(channel, discord.abc.Messageable):
+        print(f"[promotion-alert] Channel {PROMOTION_ALERT_CHANNEL_ID} is not messageable.")
         return
     embed = discord.Embed(
         title="🌸 Promotion Requirement Met",
@@ -3412,7 +3419,10 @@ async def maybe_send_promotion_alert(member: discord.Member):
         color=discord.Color.pink(),
         timestamp=utcnow(),
     )
-    await channel.send(embed=embed, view=PromotionAlertView(member.id, target_rank))
+    try:
+        await channel.send(embed=embed, view=PromotionAlertView(member.id, target_rank))
+    except Exception as e:
+        print(f"[promotion-alert] Failed to send alert for member {member.id}: {e}")
 
 async def group_role_autocomplete(interaction: discord.Interaction, current: str):
     current_lower = (current or "").lower()
