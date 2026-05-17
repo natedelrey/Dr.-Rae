@@ -1819,7 +1819,11 @@ async def handle_accept(interaction: discord.Interaction, discord_id: int, answe
         else:
             role_name = str(target_role.get("name") or "").strip()
             target_role_name = role_name or AUTO_ACCEPT_GROUP_ROLE_NAME
-            role_id = target_role.get("id")
+            role_id = (
+                target_role.get("roleId")
+                if target_role.get("roleId") is not None
+                else target_role.get("id")
+            )
             if role_id is not None:
                 try:
                     ensure_kwargs["role_id"] = int(role_id)
