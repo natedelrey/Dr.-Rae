@@ -141,7 +141,17 @@ TASK_ROBUX_PAYOUTS = {
 }
 
 PROMOTION_TASK_ALIASES = {
-    "associate_checkup": {"checkup", "anomaly checkup"},
+    "associate_checkup": {
+        "checkup",
+        "check up",
+        "check-up",
+        "anomaly checkup",
+        "anomaly check up",
+        "anomaly check-up",
+        "supervised checkup",
+        "supervised check up",
+        "supervised check-up",
+    },
     "anomaly_test": {"anomaly test"},
     "interview": {"interview"},
     "pharmacy_counter_duty": {"pharmacy", "pharmacy counter duty"},
@@ -3324,8 +3334,13 @@ async def _count_matching_tasks(conn: asyncpg.Connection, member_id: int, labels
 async def evaluate_promotion(member: discord.Member) -> tuple[str | None, str]:
     now = utcnow()
     async with bot.db_pool.acquire() as conn:
-        assigned_at = await conn.fetchval("SELECT assigned_at FROM orientations WHERE discord_id=$1", member.id)
-        passed_orientation = await conn.fetchval("SELECT passed FROM orientations WHERE discord_id=$1", member.id) or False
+        orientation_row = await conn.fetchrow(
+            "SELECT assigned_at, passed, passed_at FROM orientations WHERE discord_id=$1",
+            member.id
+        )
+        assigned_at = orientation_row["assigned_at"] if orientation_row else None
+        passed_orientation = (orientation_row["passed"] if orientation_row else False) or False
+        passed_at = orientation_row["passed_at"] if orientation_row else None
         total_tasks = await conn.fetchval("SELECT COUNT(*) FROM task_logs WHERE member_id=$1", member.id) or 0
         strikes_30 = await conn.fetchval("SELECT COUNT(*) FROM strikes WHERE member_id=$1 AND issued_at >= $2", member.id, now - datetime.timedelta(days=30)) or 0
         strikes_60 = await conn.fetchval("SELECT COUNT(*) FROM strikes WHERE member_id=$1 AND issued_at >= $2", member.id, now - datetime.timedelta(days=60)) or 0
@@ -3338,7 +3353,8 @@ async def evaluate_promotion(member: discord.Member) -> tuple[str | None, str]:
         anomaly_checkup_count = await _count_matching_tasks(conn, member.id, PROMOTION_TASK_ALIASES["anomaly_checkup"])
         specimen_count = await _count_matching_tasks(conn, member.id, PROMOTION_TASK_ALIASES["specimen_testing"])
         surgery_count = await _count_matching_tasks(conn, member.id, PROMOTION_TASK_ALIASES["surgery"])
-    days_in_dept = (now - assigned_at).days if assigned_at else 0
+    start_dt = assigned_at or member.joined_at or passed_at
+    days_in_dept = (now - start_dt).days if start_dt else 0
     if weeks_active >= 16 and days_in_dept >= 120 and strikes_60 == 0:
         return "Research Advisor", "16+ active weeks, 120+ days in department, and no disciplinary action in the last 60 days."
     if specimen_count >= 1 and surgery_count >= 1 and total_tasks >= 25 and days_in_dept >= 42 and strikes_30 == 0:
@@ -3405,6 +3421,13 @@ async def maybe_send_promotion_alert(member: discord.Member):
         return
     channel = bot.get_channel(PROMOTION_ALERT_CHANNEL_ID)
     if not channel:
+        try:
+            channel = await bot.fetch_channel(PROMOTION_ALERT_CHANNEL_ID)
+        except Exception as e:
+            print(f"[promotion-alert] Failed to fetch channel {PROMOTION_ALERT_CHANNEL_ID}: {e}")
+            return
+    if not isinstance(channel, discord.abc.Messageable):
+        print(f"[promotion-alert] Channel {PROMOTION_ALERT_CHANNEL_ID} is not messageable.")
         return
     embed = discord.Embed(
         title="🌸 Promotion Requirement Met",
@@ -3412,7 +3435,10 @@ async def maybe_send_promotion_alert(member: discord.Member):
         color=discord.Color.pink(),
         timestamp=utcnow(),
     )
-    await channel.send(embed=embed, view=PromotionAlertView(member.id, target_rank))
+    try:
+        await channel.send(embed=embed, view=PromotionAlertView(member.id, target_rank))
+    except Exception as e:
+        print(f"[promotion-alert] Failed to send alert for member {member.id}: {e}")
 
 async def group_role_autocomplete(interaction: discord.Interaction, current: str):
     current_lower = (current or "").lower()
