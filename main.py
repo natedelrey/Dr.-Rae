@@ -1181,6 +1181,19 @@ class MD_BOT(commands.Bot):
             return roles[0].name
         return "Member"
 
+    async def get_roblox_id(self, discord_id: int) -> int | None:
+        if not self.db_pool:
+            return None
+        try:
+            async with self.db_pool.acquire() as conn:
+                return await conn.fetchval(
+                    "SELECT roblox_id FROM roblox_verification WHERE discord_id = $1",
+                    discord_id,
+                )
+        except Exception as e:
+            print(f"[WARN] Failed to fetch Roblox ID for {discord_id}: {e}")
+            return None
+
     async def get_guideline_context(self, discord_id: int) -> str | None:
         if not self.db_pool:
             return None
