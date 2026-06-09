@@ -2401,6 +2401,24 @@ async def get_task_type_robux_map(enabled_only: bool = False) -> dict[str, int]:
     return {(r["task_type"] or "").casefold(): int(r["robux_value"] or 0) for r in rows}
 
 
+async def sync_weekly_task_counter(conn: asyncpg.Connection, member_id: int) -> int:
+    """Keep the legacy weekly_tasks counter aligned with weekly_task_logs."""
+    count = await conn.fetchval(
+        "SELECT COUNT(*) FROM weekly_task_logs WHERE member_id = $1",
+        member_id,
+    )
+    count = int(count or 0)
+    if count:
+        await conn.execute(
+            "INSERT INTO weekly_tasks (member_id, tasks_completed) VALUES ($1, $2) "
+            "ON CONFLICT (member_id) DO UPDATE SET tasks_completed = EXCLUDED.tasks_completed",
+            member_id, count,
+        )
+    else:
+        await conn.execute("DELETE FROM weekly_tasks WHERE member_id = $1", member_id)
+    return count
+
+
 async def task_type_autocomplete(
     interaction: discord.Interaction,
     current: str
@@ -2456,12 +2474,7 @@ class LogTaskForm(discord.ui.Modal, title='Add Comments (optional)'):
                 "VALUES ($1, $2, $3, $4, $5, $6)",
                 member_id, self.task_type, self.task_type, self.proof.url, comments_str, utcnow()
             )
-            await conn.execute(
-                "INSERT INTO weekly_tasks (member_id, tasks_completed) VALUES ($1, 1) "
-                "ON CONFLICT (member_id) DO UPDATE SET tasks_completed = weekly_tasks.tasks_completed + 1",
-                member_id
-            )
-            tasks_completed = await conn.fetchval("SELECT tasks_completed FROM weekly_tasks WHERE member_id = $1", member_id)
+            tasks_completed = await sync_weekly_task_counter(conn, member_id)
 
         full_description = f"**Task Type:** {self.task_type}\n\n**Comments:**\n{comments_str}"
         await send_long_embed(
@@ -2496,7 +2509,7 @@ async def tasks_log(interaction: discord.Interaction, task_type: str, proof: dis
 async def tasks_my(interaction: discord.Interaction):
     member_id = interaction.user.id
     async with bot.db_pool.acquire() as conn:
-        tasks_completed    = await conn.fetchval("SELECT tasks_completed FROM weekly_tasks WHERE member_id = $1", member_id) or 0
+        tasks_completed    = await conn.fetchval("SELECT COUNT(*) FROM weekly_task_logs WHERE member_id = $1", member_id) or 0
         time_spent_seconds = await conn.fetchval("SELECT time_spent FROM roblox_time WHERE member_id = $1", member_id) or 0
         active_strikes     = await conn.fetchval("SELECT COUNT(*) FROM strikes WHERE member_id=$1 AND expires_at > $2", member_id, utcnow())
     time_spent_minutes = time_spent_seconds // 60
@@ -2576,11 +2589,7 @@ async def tasks_add(
                 "VALUES ($1, $2, $3, $4, $5, $6)",
                 batch_rows
             )
-            await conn.execute(
-                "INSERT INTO weekly_tasks (member_id, tasks_completed) VALUES ($1, $2) "
-                "ON CONFLICT (member_id) DO UPDATE SET tasks_completed = weekly_tasks.tasks_completed + $2",
-                member.id, count
-            )
+            await sync_weekly_task_counter(conn, member.id)
 
         rows = await conn.fetch(
             "SELECT COALESCE(NULLIF(task_type, ''), task) AS ttype, COUNT(*) AS cnt "
@@ -2698,10 +2707,10 @@ async def tasks_type_list(interaction: discord.Interaction):
 @tasks_group.command(name="leaderboard", description="Displays the weekly leaderboard (tasks + on-site minutes).")
 async def tasks_leaderboard(interaction: discord.Interaction):
     async with bot.db_pool.acquire() as conn:
-        task_rows = await conn.fetch("SELECT member_id, tasks_completed FROM weekly_tasks")
+        task_rows = await conn.fetch("SELECT member_id, COUNT(*) AS tasks_completed FROM weekly_task_logs GROUP BY member_id")
         time_rows = await conn.fetch("SELECT member_id, time_spent FROM roblox_time")
 
-    task_map = {r['member_id']: r['tasks_completed'] for r in task_rows}
+    task_map = {r['member_id']: int(r['tasks_completed'] or 0) for r in task_rows}
     time_map = {r['member_id']: r['time_spent'] for r in time_rows}
 
     member_ids = set(task_map.keys()) | set(time_map.keys())
@@ -2743,11 +2752,7 @@ async def tasks_undo(interaction: discord.Interaction, member: discord.Member):
                 await interaction.response.send_message(f"{member.display_name} has no weekly tasks logged.", ephemeral=True)
                 return
             await conn.execute("DELETE FROM weekly_task_logs WHERE log_id = $1", last_log['log_id'])
-            await conn.execute(
-                "UPDATE weekly_tasks SET tasks_completed = GREATEST(tasks_completed - 1, 0) WHERE member_id = $1",
-                member_id
-            )
-            new_count = await conn.fetchval("SELECT tasks_completed FROM weekly_tasks WHERE member_id = $1", member_id)
+            new_count = await sync_weekly_task_counter(conn, member_id)
     await log_action("Removed Last Weekly Task", f"By: {interaction.user.mention}\nMember: {member.mention}\nRemoved: **{last_log['task']}**")
     await interaction.response.send_message(
         f"Removed last weekly task for {member.mention}: '{last_log['task']}'. They now have {new_count} tasks.",
@@ -2769,7 +2774,7 @@ async def tasks_weekly_preview(interaction: discord.Interaction):
         "**❌ Below Quota (0):**\n—\n\n"
         "**🚫 0 Activity (0):**\n—\n\n"
         "**🟦 Excused (0):**\n—\n\n"
-        "*Robux totals include base payouts from weekly logs. Recruitment +200 promotion bonuses must be manually verified by management.*\n\n"
+        "*Robux totals and task counts are calculated from weekly log entries. Recruitment +200 promotion bonuses must be manually verified by management.*\n\n"
         "This is only a preview command for style testing; no data was reset."
     )
 
@@ -3189,23 +3194,37 @@ async def check_weekly_tasks():
     dept_member_ids = {m.id for m in dept_role.members if not m.bot}
 
     async with bot.db_pool.acquire() as conn:
-        all_tasks = await conn.fetch("SELECT member_id, tasks_completed FROM weekly_tasks")
+        all_tasks = await conn.fetch(
+            "SELECT member_id, COUNT(*) AS tasks_completed "
+            "FROM weekly_task_logs GROUP BY member_id"
+        )
         all_time = await conn.fetch("SELECT member_id, time_spent FROM roblox_time")
         payout_rows = await conn.fetch(
             "SELECT member_id, COALESCE(NULLIF(task_type, ''), task) AS ttype, COUNT(*) AS cnt "
             "FROM weekly_task_logs GROUP BY member_id, ttype"
         )
+        db_robux_rows = await conn.fetch("SELECT task_type, robux_value FROM task_types")
 
-    tasks_map = {r['member_id']: r['tasks_completed'] for r in all_tasks if r['member_id'] in dept_member_ids}
+    tasks_map = {r['member_id']: int(r['tasks_completed'] or 0) for r in all_tasks if r['member_id'] in dept_member_ids}
     time_map = {r['member_id']: r['time_spent'] for r in all_time if r['member_id'] in dept_member_ids}
+    payout_lookup = {
+        **{task_type.casefold(): value for task_type, value in TASK_ROBUX_PAYOUTS.items()},
+        **{(r['task_type'] or '').casefold(): int(r['robux_value'] or 0) for r in db_robux_rows},
+    }
     robux_map: dict[int, int] = {}
+    task_breakdown_map: dict[int, list[tuple[str, int]]] = {}
     for row in payout_rows:
         member_id = row['member_id']
         if member_id not in dept_member_ids:
             continue
-        payout = TASK_ROBUX_PAYOUTS.get(row['ttype'], 0)
+        task_type = row['ttype'] or "Uncategorized"
+        count = int(row['cnt'] or 0)
+        task_breakdown_map.setdefault(member_id, []).append((task_type, count))
+        payout = payout_lookup.get(task_type.casefold(), 0)
         if payout:
-            robux_map[member_id] = robux_map.get(member_id, 0) + (payout * row['cnt'])
+            robux_map[member_id] = robux_map.get(member_id, 0) + (payout * count)
+    for breakdown in task_breakdown_map.values():
+        breakdown.sort(key=lambda item: (-item[1], item[0].casefold()))
     met, not_met, zero = [], [], []
     considered_ids = set(tasks_map.keys()) | set(time_map.keys())
 
@@ -3216,10 +3235,11 @@ async def check_weekly_tasks():
         tasks_done = tasks_map.get(member_id, 0)
         time_done_minutes = (time_map.get(member_id, 0)) // 60
         robux_total = robux_map.get(member_id, 0)
+        task_breakdown = task_breakdown_map.get(member_id, [])
         if tasks_done >= WEEKLY_REQUIREMENT and time_done_minutes >= WEEKLY_TIME_REQUIREMENT:
-            met.append((member, tasks_done, time_done_minutes, robux_total))
+            met.append((member, tasks_done, time_done_minutes, robux_total, task_breakdown))
         else:
-            not_met.append((member, tasks_done, time_done_minutes, robux_total))
+            not_met.append((member, tasks_done, time_done_minutes, robux_total, task_breakdown))
 
     zero_ids = dept_member_ids - considered_ids
     for mid in zero_ids:
@@ -3228,16 +3248,21 @@ async def check_weekly_tasks():
             zero.append((member, robux_map.get(mid, 0)))
 
     # Post report
+    def fmt_breakdown(task_breakdown: list[tuple[str, int]]) -> str:
+        if not task_breakdown:
+            return "no logged tasks"
+        return ", ".join(f"{count}× {task_type}" for task_type, count in task_breakdown)
+
     def fmt_met(lst):
         return "\n".join(
-            f"• {m.mention} | {robux}R$ — {t}/{WEEKLY_REQUIREMENT} tasks, {mins}/{WEEKLY_TIME_REQUIREMENT} mins"
-            for m, t, mins, robux in lst
+            f"• {m.mention} | {robux}R$ — {t}/{WEEKLY_REQUIREMENT} tasks ({fmt_breakdown(breakdown)}), {mins}/{WEEKLY_TIME_REQUIREMENT} mins"
+            for m, t, mins, robux, breakdown in lst
         ) if lst else "—"
 
     def fmt_not_met(lst):
         return "\n".join(
-            f"• {m.mention} | {robux}R$ — {t}/{WEEKLY_REQUIREMENT} tasks, {mins}/{WEEKLY_TIME_REQUIREMENT} mins"
-            for m, t, mins, robux in lst
+            f"• {m.mention} | {robux}R$ — {t}/{WEEKLY_REQUIREMENT} tasks ({fmt_breakdown(breakdown)}), {mins}/{WEEKLY_TIME_REQUIREMENT} mins"
+            for m, t, mins, robux, breakdown in lst
         ) if lst else "—"
 
     def fmt_zero(lst):
@@ -3250,7 +3275,7 @@ async def check_weekly_tasks():
     summary += f"**✅ Met Requirement ({len(met)}):**\n{fmt_met(met)}\n\n"
     summary += f"**❌ Below Quota ({len(not_met)}):**\n{fmt_not_met(not_met)}\n\n"
     summary += f"**🚫 0 Activity ({len(zero)}):**\n{fmt_zero(zero)}\n\n"
-    summary += "*Robux totals include base payouts from weekly logs. Recruitment +200 promotion bonuses must be manually verified by management.*\n\n"
+    summary += "*Robux totals and task counts are calculated from weekly log entries. Recruitment +200 promotion bonuses must be manually verified by management.*\n\n"
     summary += "Weekly counts will now be reset."
 
     await send_long_embed(
