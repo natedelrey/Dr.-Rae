@@ -87,10 +87,11 @@ Quota resets weekly at Sunday 4:00 AM UTC.
 * If not filed, quota must still be met weekly.
 * IN start/end weeks are fully exempt from quota.
 
-§3 | Low Command Quota
+§3 | Member Quota
 
-* 30 minutes on-site.
-* 1 departmental service.
+* 20 minutes on-site.
+* 1 test.
+* 2 miscellaneous departmental tasks.
 
 §4 | Management/Executive Quota
 
@@ -305,4 +306,3 @@ Usage: Internal imaging for broken bones or condition diagnosis.
 ---
 
 END OF DOCUMENT
-
