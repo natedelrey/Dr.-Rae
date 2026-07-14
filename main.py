@@ -45,15 +45,6 @@ ACTIVITY_LOG_CHANNEL_ID      = getenv_int("ACTIVITY_LOG_CHANNEL_ID", 14096464168
 ROBLOX_AUDIT_LOG_CHANNEL_ID  = getenv_int("ROBLOX_AUDIT_LOG_CHANNEL_ID", COMMAND_LOG_CHANNEL_ID)
 COMMS_CHANNEL_ID             = getenv_int("COMMS_CHANNEL_ID")
 PROMOTION_ALERT_CHANNEL_ID   = getenv_int("PROMOTION_ALERT_CHANNEL_ID")
-APPLICATION_MANAGEMENT_CHANNEL_ID = 1405988167982649436
-APPLICATION_BLACKLIST_LOG_CHANNEL_ID = 1503914526989488128
-
-# Extra roles to grant on successful application
-APPLICATION_EXTRA_ROLE_IDS = [
-    1405988543230382091,
-    1405981117235990640,
-]
-
 # DB / API
 DATABASE_URL   = os.getenv("DATABASE_URL")
 API_SECRET_KEY = os.getenv("API_SECRET_KEY")  # for /roblox webhook auth
@@ -88,25 +79,13 @@ if ROBLOX_REMOVE_URL and not ROBLOX_REMOVE_URL.startswith("http"):
     ROBLOX_REMOVE_URL = "https://" + ROBLOX_REMOVE_URL
 ROBLOX_REMOVE_SECRET = os.getenv("ROBLOX_REMOVE_SECRET") or None
 ROBLOX_GROUP_ID      = os.getenv("ROBLOX_GROUP_ID") or "745163328"  # optional, forwarded if present
-ROBLOX_MEDICAL_DIVISION_URL = "https://www.roblox.com/communities/745163328/Department-of-Medical-Sciences#!/about"
-
-APPLICATION_PENDING_WARNING = (
-    "⚠️ **Reminder:** Ensure you have a pending join request for the "
-    f"[Department of Medical Sciences Roblox group]({ROBLOX_MEDICAL_DIVISION_URL})."
-)
-
-# Roblox rank configuration for automatic onboarding
-AUTO_ACCEPT_GROUP_ROLE_NAME   = os.getenv("AUTO_ACCEPT_GROUP_ROLE_NAME") or "Associate"
-
 # Rank manager role (can run /rank)
 RANK_MANAGER_ROLE_ID = getenv_int("RANK_MANAGER_ROLE_ID", 1405979816120942702)
 
-# Staff role (can view/override application queue)
-STAFF_ROLE_ID = getenv_int("STAFF_ROLE_ID", (MANAGEMENT_ROLE_ID or 0))
-
 # Weekly configs
-WEEKLY_REQUIREMENT      = int(os.getenv("WEEKLY_REQUIREMENT", "1"))
-WEEKLY_TIME_REQUIREMENT = int(os.getenv("WEEKLY_TIME_REQUIREMENT", "30"))  # minutes
+WEEKLY_TEST_REQUIREMENT = int(os.getenv("WEEKLY_TEST_REQUIREMENT", "1"))
+WEEKLY_MISC_REQUIREMENT = int(os.getenv("WEEKLY_MISC_REQUIREMENT", "2"))
+WEEKLY_TIME_REQUIREMENT = int(os.getenv("WEEKLY_TIME_REQUIREMENT", "20"))  # minutes
 
 # === Bot Setup ===
 intents = discord.Intents.default()
@@ -119,6 +98,7 @@ TASK_TYPES = [
     "Post-Op Interview",
     "Checkup",
     "Anomaly Checkup",
+    "Anomaly Test",
     "Pharmacy",
     "Department of Medical Sciences Recruitment",
 ]
@@ -136,6 +116,7 @@ TASK_ROBUX_PAYOUTS = {
     "Post-Op Interview": 20,
     "Checkup": 35,
     "Anomaly Checkup": 100,
+    "Anomaly Test": 100,
     "Pharmacy": 35,
     "Department of Medical Sciences Recruitment": 5,  # +200 bonus is manually verified by management
 }
@@ -161,57 +142,6 @@ PROMOTION_TASK_ALIASES = {
 }
 
 PROMOTION_RANK_ORDER = ["Associate", "Assistant Researcher", "Researcher", "Practitioner", "Research Advisor"]
-
-# === Application System Config ===
-APPLICATION_AUTO_ACCEPT_THRESHOLD = float(os.getenv("APPLICATION_AUTO_ACCEPT_THRESHOLD", "55"))
-APPLICATION_BORDERLINE_MIN        = float(os.getenv("APPLICATION_BORDERLINE_MIN", "30"))
-APPLICATION_HARD_REJECT_THRESHOLD = float(os.getenv("APPLICATION_HARD_REJECT_THRESHOLD", "20"))
-APPLICATION_TIMEOUT_MINUTES       = int(os.getenv("APPLICATION_TIMEOUT_MINUTES", "20"))  # idle per step
-APPLICATION_COOLDOWN_HOURS        = int(os.getenv("APPLICATION_COOLDOWN_HOURS", "24"))   # after decision
-
-# The core questions for the MD application (order matters)
-APPLICATION_QUESTIONS: list[dict[str, Any]] = [
-    {
-        "code": "roblox_username",
-        "prompt": "What is your exact Roblox username? (Case-sensitive, please double-check.)",
-        "type": "short",
-        "required": True,
-        "min_len": 3,
-        "max_len": 32
-    },
-    {
-        "code": "availability",
-        "prompt": "How many hours a week can you actively participate with the Department of Medical Sciences? Be honest.",
-        "type": "short",
-        "required": True,
-        "min_len": 1,
-        "max_len": 200
-    },
-    {
-        "code": "experience",
-        "prompt": "List relevant experience: groups, roles, medical RP, or responsibilities you’ve handled.",
-        "type": "long",
-        "required": True,
-        "min_len": 50,
-        "max_len": 1200
-    },
-    {
-        "code": "communication",
-        "prompt": "Describe your communication style and how you handle conflicts.",
-        "type": "long",
-        "required": True,
-        "min_len": 50,
-        "max_len": 1200
-    },
-    {
-        "code": "policy",
-        "prompt": "Pick one MD guideline you find crucial and explain why it matters in practice.",
-        "type": "long",
-        "required": True,
-        "min_len": 50,
-        "max_len": 1200
-    }
-]
 
 def utcnow():
     return datetime.datetime.now(datetime.timezone.utc)
@@ -792,7 +722,7 @@ class SimpleOpenAI:
             "for example, if a member mentions 'the cart', treat it as the Cure Cart whenever that appears in the handbook. "
             "Always remind members to follow official procedures if unsure and keep responses respectful. "
             f"Whenever a question touches on quota or activity expectations, spell out the standard expectation of "
-            f"{WEEKLY_REQUIREMENT} logged services and {WEEKLY_TIME_REQUIREMENT} minutes on-site. "
+            f"{WEEKLY_TIME_REQUIREMENT} minutes on-site, {WEEKLY_TEST_REQUIREMENT} test, and {WEEKLY_MISC_REQUIREMENT} miscellaneous tasks. "
             "When explaining how to complete a task—such as running a checkup—lay out the process in clear, ordered steps "
             "so the member knows exactly what to do from preparation through logging."
         )
@@ -831,67 +761,6 @@ class SimpleOpenAI:
                 data = json.loads(txt)
                 return data["choices"][0]["message"]["content"].strip()
 
-    async def score_application(self, answers: dict[str, str]) -> dict:
-        """
-        Call Chat Completions with a strict JSON schema for:
-        overall_score (0-100), verdict, dimension scores, rationale, flags[].
-        """
-        system = (
-            "You are a supportive reviewer for Department of Medical Sciences applications. "
-            "Default to accepting applicants unless their answers clearly show trolling, rule-breaking, or an inability to participate. "
-            "Output only valid JSON."
-        )
-        user_content = {
-            "instructions": (
-                "Score this applicant using the rubric with a generous lens. "
-                "Only recommend rejection when responses are extremely poor, off-topic, or violate guidelines. "
-                "Return strict JSON (no prose)."
-            ),
-            "rubric": {
-                "dimensions": {
-                    "commitment": "Evidence of availability/consistency",
-                    "clarity": "Clear writing and coherent reasoning",
-                    "experience": "Relevant past roles/responsibility fit",
-                    "professionalism": "Tone, maturity, no toxicity",
-                    "policy": "Understands and respects guidelines"
-                },
-                "weights": {"commitment": 0.25, "clarity": 0.20, "experience": 0.25, "professionalism": 0.15, "policy": 0.15},
-                "output_schema": {
-                    "overall_score": "number 0..100",
-                    "verdict": "accept|borderline|reject",
-                    "dimension_scores": {"commitment": 0, "clarity": 0, "experience": 0, "professionalism": 0, "policy": 0},
-                    "rationale": "string",
-                    "flags": ["optional string flags like 'toxicity' or 'plagiarism_suspected'"]
-                }
-            },
-            "answers": answers
-        }
-        payload = {
-            "model": AI_MODEL,
-            "response_format": {"type": "json_object"},
-            "messages": [
-                {"role": "system", "content": system},
-                {"role": "user", "content": json.dumps(user_content)}
-            ],
-            "temperature": 0.2
-        }
-        headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json"
-        }
-        url = f"{self.base_url}/chat/completions"
-        async with aiohttp.ClientSession() as session:
-            async with session.post(url, headers=headers, json=payload, timeout=60) as resp:
-                txt = await resp.text()
-                if resp.status // 100 != 2:
-                    raise RuntimeError(f"AI review failed {resp.status}: {txt}")
-                data = json.loads(txt)
-                content = data["choices"][0]["message"]["content"]
-                try:
-                    return json.loads(content)
-                except Exception:
-                    cleaned = content.strip().strip("`")
-                    return json.loads(cleaned)
 
 # === Bot class ===
 class MD_BOT(commands.Bot):
@@ -1055,91 +924,6 @@ class MD_BOT(commands.Bot):
                     );
                 ''')
 
-                # === New: Application system tables ===
-                await connection.execute('''
-                    CREATE TABLE IF NOT EXISTS applicants (
-                        id BIGSERIAL PRIMARY KEY,
-                        discord_id BIGINT UNIQUE NOT NULL,
-                        roblox_username TEXT,
-                        roblox_user_id BIGINT,
-                        status TEXT NOT NULL DEFAULT 'in_progress', -- in_progress|submitted|accepted|rejected
-                        created_at TIMESTAMPTZ DEFAULT now(),
-                        updated_at TIMESTAMPTZ DEFAULT now(),
-                        last_active TIMESTAMPTZ DEFAULT now(),
-                        cooldown_until TIMESTAMPTZ
-                    );
-                ''')
-                await connection.execute('''
-                    CREATE TABLE IF NOT EXISTS application_runs (
-                        id BIGSERIAL PRIMARY KEY,
-                        applicant_id BIGINT REFERENCES applicants(id) ON DELETE CASCADE,
-                        started_at TIMESTAMPTZ DEFAULT now(),
-                        submitted_at TIMESTAMPTZ
-                    );
-                ''')
-                await connection.execute('''
-                    CREATE TABLE IF NOT EXISTS questions (
-                        id SERIAL PRIMARY KEY,
-                        code TEXT UNIQUE NOT NULL,
-                        prompt TEXT NOT NULL,
-                        type TEXT NOT NULL,
-                        order_index INT NOT NULL
-                    );
-                ''')
-                await connection.execute('''
-                    CREATE TABLE IF NOT EXISTS answers (
-                        id BIGSERIAL PRIMARY KEY,
-                        run_id BIGINT REFERENCES application_runs(id) ON DELETE CASCADE,
-                        question_code TEXT NOT NULL,
-                        answer_text TEXT,
-                        created_at TIMESTAMPTZ DEFAULT now()
-                    );
-                ''')
-                await connection.execute('''
-                    CREATE TABLE IF NOT EXISTS ai_reviews (
-                        id BIGSERIAL PRIMARY KEY,
-                        run_id BIGINT REFERENCES application_runs(id) ON DELETE CASCADE,
-                        model TEXT NOT NULL,
-                        score NUMERIC(5,2),
-                        verdict TEXT,
-                        rationale TEXT,
-                        tokens_in INT,
-                        tokens_out INT,
-                        created_at TIMESTAMPTZ DEFAULT now()
-                    );
-                ''')
-                await connection.execute('''
-                    CREATE TABLE IF NOT EXISTS decisions (
-                        id BIGSERIAL PRIMARY KEY,
-                        run_id BIGINT REFERENCES application_runs(id) ON DELETE CASCADE,
-                        decided_by TEXT NOT NULL,  -- 'ai' or 'staff:<discord_id>'
-                        decision TEXT NOT NULL,    -- accept|reject
-                        reason TEXT,
-                        created_at TIMESTAMPTZ DEFAULT now()
-                    );
-                ''')
-                await connection.execute('''
-                    CREATE TABLE IF NOT EXISTS application_blacklist (
-                        id BIGSERIAL PRIMARY KEY,
-                        discord_id BIGINT UNIQUE NOT NULL,
-                        discord_username TEXT,
-                        roblox_username TEXT,
-                        reason TEXT NOT NULL,
-                        blacklisted_by BIGINT NOT NULL,
-                        blacklisted_at TIMESTAMPTZ DEFAULT now()
-                    );
-                ''')
-
-                # Seed/refresh "questions" ordering to match APPLICATION_QUESTIONS
-                for idx, q in enumerate(APPLICATION_QUESTIONS):
-                    await connection.execute(
-                        """
-                        INSERT INTO questions (code, prompt, type, order_index)
-                        VALUES ($1, $2, $3, $4)
-                        ON CONFLICT (code) DO UPDATE SET prompt = EXCLUDED.prompt, type = EXCLUDED.type, order_index = EXCLUDED.order_index
-                        """,
-                        q["code"], q["prompt"], q["type"], idx
-                    )
 
             print("[DB] Tables ready.")
 
@@ -1403,9 +1187,9 @@ async def global_app_command_error(interaction: discord.Interaction, error: app_
                 pass
 
 # === PART 1/3 END ===
-# Reply "next" and I'll send PART 2/3 with: /verify, the /apply wizard, AI review, and auto-accept (including accept-join → rank → welcome).
+# Reply "next" and I'll send PART 2/3 with: /verify.
 # main.py (Medical Department bot) — PART 2/3
-# Continues directly from Part 1 — /verify, /apply wizard, AI review, and auto-accept flow.
+# Continues directly from Part 1 — /verify.
 
 # /verify
 @bot.tree.command(name="verify", description="Link your Roblox account to the bot.")
@@ -1432,661 +1216,7 @@ async def verify(interaction: discord.Interaction, roblox_username: str):
             else:
                 await interaction.response.send_message("There was an error looking up the Roblox user.", ephemeral=True)
 
-# --- Application flow ---
-
-class ApplicationModal(discord.ui.Modal):
-    """Modal for long-answer questions."""
-    def __init__(self, question_code: str, question_text: str, min_len: int, max_len: int):
-        modal_title = question_text if len(question_text) <= 45 else question_text[:42] + "..."
-        super().__init__(title=modal_title)
-        self.q_code = question_code
-        self.min_len = min_len
-        self.max_len = max_len
-        self.answer = None
-        placeholder = question_text if len(question_text) <= 100 else question_text[:97] + "..."
-        self.q_field = discord.ui.TextInput(
-            label="Your Answer",
-            style=discord.TextStyle.paragraph,
-            min_length=min_len if 0 < min_len < max_len else None,
-            max_length=max_len,
-            required=True,
-            placeholder=placeholder
-        )
-        self.add_item(self.q_field)
-
-    async def on_submit(self, interaction: discord.Interaction):
-        self.answer = self.q_field.value.strip()
-        await interaction.response.defer()
-
-class ApplyView(discord.ui.View):
-    """Dynamic per-user application wizard view."""
-    def __init__(self, user_id: int):
-        super().__init__(timeout=None)
-        self.user_id = user_id
-        self.current_index = 0
-        self.answers: dict[str, str] = {}
-        self.stage: str = "intro"
-        self.review_message_sent = False
-        self.total_questions = len(APPLICATION_QUESTIONS)
-        # Button adjustments happen post-init once components exist
-        self.next.label = "Start Application"
-        self.next.style = discord.ButtonStyle.green
-
-    def _progress_bar(self) -> str:
-        if not self.total_questions:
-            return "[██████████] (0/0)"
-        ratio = self.current_index / self.total_questions
-        filled = max(0, min(10, int(round(ratio * 10))))
-        bar = "█" * filled + "░" * (10 - filled)
-        return f"[{bar}] ({self.current_index}/{self.total_questions})"
-
-    def _base_message(self) -> str:
-        header = "**Department of Medical Sciences Application**"
-        progress = f"Progress: {self._progress_bar()}"
-        if self.stage == "review":
-            body = (
-                "Review your answers in the summary below, then press **Submit Application** when you're ready."
-            )
-        elif self.stage == "submitting":
-            body = "Submitting your responses for review… please wait."
-        elif self.stage == "completed":
-            body = "Your application has been submitted. You may close this window."
-        elif self.current_index == 0:
-            body = (
-                "Press **Start Application** to answer the first question.\n\n"
-                f"{APPLICATION_PENDING_WARNING}"
-            )
-        else:
-            body = "Click **Next Question** to continue."
-        return f"{header}\n{progress}\n\n{body}"
-
-    def _truncate(self, text: str, limit: int = 200) -> str:
-        clean = text.strip()
-        if not clean:
-            return "*No response provided*"
-        if len(clean) <= limit:
-            return clean
-        return clean[: limit - 3] + "..."
-
-    async def _refresh_message(self, interaction: discord.Interaction):
-        if self.stage == "review":
-            self.next.label = "Submit Application"
-            self.next.style = discord.ButtonStyle.green
-        elif self.stage == "completed":
-            self.next.label = "Submitted"
-            self.next.disabled = True
-            self.next.style = discord.ButtonStyle.gray
-        elif self.current_index == 0:
-            self.next.label = "Start Application"
-            self.next.style = discord.ButtonStyle.green
-        else:
-            self.next.label = "Next Question"
-            self.next.style = discord.ButtonStyle.blurple
-
-        if interaction.response.is_done():
-            await interaction.edit_original_response(content=self._base_message(), view=self)
-        else:
-            await interaction.response.edit_message(content=self._base_message(), view=self)
-
-    def _build_review_embed(self) -> discord.Embed:
-        embed = discord.Embed(
-            title="Application Review",
-            description="Please look over your responses before submitting.",
-            color=discord.Color.blurple(),
-            timestamp=utcnow()
-        )
-        for question in APPLICATION_QUESTIONS:
-            answer = self.answers.get(question["code"], "")
-            snippet = self._truncate(answer)
-            embed.add_field(name=question["prompt"][:256], value=escape_markdown(snippet), inline=False)
-        return embed
-
-    async def _ensure_applicant_row(self):
-        async with bot.db_pool.acquire() as conn:
-            await conn.execute(
-                "INSERT INTO applicants (discord_id, status) VALUES ($1,'in_progress') "
-                "ON CONFLICT (discord_id) DO UPDATE SET last_active = now(), updated_at = now()",
-                self.user_id
-            )
-
-    async def _after_answer(self, interaction: discord.Interaction):
-        self.current_index = min(self.current_index + 1, self.total_questions)
-        self.stage = "questions"
-        await self._refresh_message(interaction)
-        if self.current_index >= self.total_questions:
-            await self.show_review(interaction)
-
-    @discord.ui.button(label="Next", style=discord.ButtonStyle.blurple)
-    async def next(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.user.id != self.user_id:
-            await interaction.response.send_message("This isn’t your application.", ephemeral=True)
-            return
-
-        if self.stage == "completed":
-            await interaction.response.send_message("Your application has already been submitted.", ephemeral=True)
-            return
-
-        if self.stage == "review":
-            await self.submit_application(interaction)
-            return
-
-        if self.current_index >= self.total_questions:
-            await self.show_review(interaction)
-            return
-
-        await self.present_question(interaction)
-
-    async def present_question(self, interaction: discord.Interaction):
-        await self._ensure_applicant_row()
-
-        question = APPLICATION_QUESTIONS[self.current_index]
-        prompt = question["prompt"]
-        q_code = question["code"]
-
-        # Ask via ephemeral message so the full prompt is always visible.
-        # Modal titles/labels have strict character limits and can truncate long questions.
-        await interaction.response.send_message(prompt, ephemeral=True)
-        try:
-            msg = await bot.wait_for(
-                "message",
-                check=lambda m: m.author.id == interaction.user.id and m.channel == interaction.channel,
-                timeout=APPLICATION_TIMEOUT_MINUTES * 60
-            )
-        except asyncio.TimeoutError:
-            await interaction.followup.send("⏰ Application timed out. Please restart with `/apply`.", ephemeral=True)
-            return
-
-        ans = (msg.content or "").strip()
-        if question.get("min_len") and len(ans) < question["min_len"]:
-            await interaction.followup.send(
-                f"Please provide at least **{question['min_len']}** characters.",
-                ephemeral=True
-            )
-            try:
-                await msg.delete()
-            except Exception:
-                pass
-            return
-
-        if question.get("max_len"):
-            ans = ans[: question["max_len"]]
-        self.answers[q_code] = ans
-        try:
-            await msg.delete()
-        except Exception:
-            pass
-
-        await self._after_answer(interaction)
-
-    async def show_review(self, interaction: discord.Interaction):
-        self.stage = "review"
-        self.current_index = self.total_questions
-        await self._refresh_message(interaction)
-        if not self.review_message_sent:
-            embed = self._build_review_embed()
-            await interaction.followup.send(
-                "Here is a summary of your responses. If you need to make major changes, you can restart `/apply` before submitting.",
-                embed=embed,
-                ephemeral=True
-            )
-            self.review_message_sent = True
-
-    async def submit_application(self, interaction: discord.Interaction):
-        if len(self.answers) < self.total_questions:
-            await interaction.response.send_message(
-                "Please answer every question before submitting.",
-                ephemeral=True
-            )
-            return
-
-        self.stage = "submitting"
-        self.next.disabled = True
-        self.next.label = "Submitting..."
-        self.next.style = discord.ButtonStyle.gray
-
-        await interaction.response.defer(ephemeral=True, thinking=True)
-        await interaction.edit_original_response(content=self._base_message(), view=self)
-
-        roblox_username = (self.answers.get("roblox_username") or "").strip()
-
-        try:
-            async with bot.db_pool.acquire() as conn:
-                applicant_id = await conn.fetchval(
-                    "INSERT INTO applicants (discord_id, roblox_username, status, updated_at) "
-                    "VALUES ($1, $2, 'submitted', now()) "
-                    "ON CONFLICT (discord_id) DO UPDATE SET roblox_username = EXCLUDED.roblox_username, status='submitted', updated_at=now() "
-                    "RETURNING id",
-                    self.user_id, roblox_username or None
-                )
-                run_id = await conn.fetchval(
-                    "INSERT INTO application_runs (applicant_id, started_at, submitted_at) VALUES ($1, now(), now()) RETURNING id",
-                    applicant_id
-                )
-                for code, text in self.answers.items():
-                    await conn.execute(
-                        "INSERT INTO answers (run_id, question_code, answer_text, created_at) VALUES ($1, $2, $3, now())",
-                        run_id, code, text
-                    )
-
-            await interaction.followup.send(
-                "✅ Application submitted! Evaluating your responses...\n\n"
-                f"{APPLICATION_PENDING_WARNING}",
-                ephemeral=True,
-            )
-
-            async with bot.db_pool.acquire() as conn:
-                blacklist_row = await conn.fetchrow(
-                    "SELECT reason, blacklisted_by FROM application_blacklist WHERE discord_id=$1",
-                    self.user_id,
-                )
-
-            if blacklist_row:
-                reason = str(blacklist_row["reason"])[:500]
-                blacklisted_by = int(blacklist_row["blacklisted_by"])
-                async with bot.db_pool.acquire() as conn:
-                    await conn.execute(
-                        "INSERT INTO decisions (run_id, decided_by, decision, reason) VALUES ($1,$2,$3,$4)",
-                        run_id, f"blacklist:{blacklisted_by}", "reject", f"BLACKLISTED: {reason}"
-                    )
-                    await conn.execute(
-                        "UPDATE applicants SET status='rejected', cooldown_until = (now() + ($1 * interval '1 hour')), updated_at=now() WHERE discord_id=$2",
-                        APPLICATION_COOLDOWN_HOURS, self.user_id
-                    )
-
-                management_channel = bot.get_channel(APPLICATION_MANAGEMENT_CHANNEL_ID)
-                if management_channel:
-                    await management_channel.send(
-                        f"🚫 Blacklisted applicant detected: <@{self.user_id}> (`{self.user_id}`)\n"
-                        f"Do not accept this application. Blacklist reason: {reason}\n"
-                        f"Blacklisted by: <@{blacklisted_by}>"
-                    )
-
-                await interaction.followup.send(
-                    "⚠️ Your application needs further review by management.",
-                    ephemeral=True,
-                )
-                self.stage = "completed"
-                self.next.label = "Submitted"
-                self.next.disabled = True
-                self.next.style = discord.ButtonStyle.gray
-                await interaction.edit_original_response(content=self._base_message(), view=self)
-                return
-
-            try:
-                result = await bot.ai.score_application(self.answers)
-            except Exception as e:
-                self.stage = "review"
-                self.next.disabled = False
-                self.next.label = "Submit Application"
-                self.next.style = discord.ButtonStyle.green
-                await interaction.edit_original_response(content=self._base_message(), view=self)
-                await interaction.followup.send(f"AI review failed: {e}", ephemeral=True)
-                await log_action("Application AI Error", f"User: <@{self.user_id}>\nError: {e}")
-                return
-
-            try:
-                score = float(result.get("overall_score", 0))
-            except Exception:
-                score = 0.0
-            verdict = (result.get("verdict") or "reject").lower()
-            rationale = (result.get("rationale") or "")[:1500]
-            flags_raw = result.get("flags") or []
-            if isinstance(flags_raw, str):
-                flags_raw = [flags_raw]
-            flags = [str(flag).lower() for flag in flags_raw if isinstance(flag, str)]
-
-            await log_action(
-                "Application Scored",
-                f"User: <@{self.user_id}>\nScore: **{score:.1f}**\nVerdict: `{verdict}`\nFlags: {', '.join(flags) or 'none'}\nRationale: {rationale[:300]}..."
-            )
-
-            async with bot.db_pool.acquire() as conn:
-                await conn.execute(
-                    "INSERT INTO ai_reviews (run_id, model, score, verdict, rationale) VALUES ($1,$2,$3,$4,$5)",
-                    run_id, AI_MODEL, score, verdict, rationale
-                )
-
-            severe_terms = {"toxicity", "harassment", "hate", "plagiarism_suspected", "troll", "spam"}
-            has_severe_flag = any(flag in severe_terms for flag in flags)
-
-            decision_made = False
-            if not has_severe_flag and (verdict == "accept" or score >= APPLICATION_AUTO_ACCEPT_THRESHOLD):
-                await handle_accept(interaction, self.user_id, self.answers, run_id)
-                decision_made = True
-            elif not has_severe_flag and (score >= APPLICATION_BORDERLINE_MIN or verdict == "borderline"):
-                await handle_borderline(interaction, self.user_id, self.answers, score, run_id)
-                decision_made = True
-            elif not has_severe_flag and score >= APPLICATION_HARD_REJECT_THRESHOLD:
-                await handle_borderline(interaction, self.user_id, self.answers, score, run_id)
-                decision_made = True
-            else:
-                await handle_reject(interaction, self.user_id, score, rationale, run_id)
-                decision_made = True
-
-            if decision_made:
-                self.stage = "completed"
-                self.next.label = "Submitted"
-                self.next.disabled = True
-                self.next.style = discord.ButtonStyle.gray
-                await interaction.edit_original_response(content=self._base_message(), view=self)
-
-        except Exception as exc:
-            self.stage = "review"
-            self.next.disabled = False
-            self.next.label = "Submit Application"
-            self.next.style = discord.ButtonStyle.green
-            await interaction.edit_original_response(content=self._base_message(), view=self)
-            await interaction.followup.send(f"There was an error submitting your application: {exc}", ephemeral=True)
-            await log_action("Application Submission Error", f"User: <@{self.user_id}>\nError: {exc}")
-
-async def handle_accept(interaction: discord.Interaction, discord_id: int, answers: dict, run_id: int):
-    """Accept, verify Roblox, accept join request if pending, rank, welcome, and set cooldown."""
-    member = find_member(discord_id)
-    roblox_name = (answers.get("roblox_username") or "").strip()
-    if not member:
-        await log_action("Application Accepted (but member missing)", f"User ID: {discord_id}")
-        return
-
-    # Auto verify Roblox
-    roblox_id = None
-    if roblox_name:
-        payload = {"usernames": [roblox_name], "excludeBannedUsers": True}
-        async with aiohttp.ClientSession() as session:
-            async with session.post("https://users.roblox.com/v1/usernames/users", json=payload) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    if data.get("data"):
-                        user_info = data["data"][0]
-                        roblox_id = user_info["id"]
-                        roblox_name = str(user_info.get("name") or roblox_name)
-                        async with bot.db_pool.acquire() as conn:
-                            await conn.execute(
-                                "INSERT INTO roblox_verification (discord_id, roblox_id) VALUES ($1,$2) "
-                                "ON CONFLICT (discord_id) DO UPDATE SET roblox_id=EXCLUDED.roblox_id",
-                                discord_id, roblox_id
-                            )
-                        await log_action("Auto Verified", f"User: <@{discord_id}> | Roblox: `{roblox_name}` ({roblox_id})")
-
-    # Accept join request if pending, then rank to the configured Roblox group role
-    if roblox_id:
-        ensure_kwargs: dict[str, int] = {}
-        target_role_name: str | None = None
-        target_role = await find_group_role_by_name(AUTO_ACCEPT_GROUP_ROLE_NAME)
-        if not target_role:
-            print(
-                f"[WARN] Auto-accept Roblox role '{AUTO_ACCEPT_GROUP_ROLE_NAME}' not found in group ranks."
-            )
-        else:
-            role_name = str(target_role.get("name") or "").strip()
-            target_role_name = role_name or AUTO_ACCEPT_GROUP_ROLE_NAME
-            role_id = (
-                target_role.get("roleId")
-                if target_role.get("roleId") is not None
-                else target_role.get("id")
-            )
-            if role_id is not None:
-                try:
-                    ensure_kwargs["role_id"] = int(role_id)
-                except Exception:
-                    pass
-            if not ensure_kwargs:
-                rank_value = target_role.get("rank")
-                if rank_value is None:
-                    rank_value = target_role.get("rankNumber")
-                if rank_value is not None:
-                    try:
-                        ensure_kwargs["rank_number"] = int(rank_value)
-                    except Exception:
-                        pass
-        if not ensure_kwargs:
-            print(
-                f"[WARN] Unable to determine Roblox role ID or rank number for '{AUTO_ACCEPT_GROUP_ROLE_NAME}'."
-            )
-            roblox_rank_success = False
-        else:
-            roblox_rank_success = await ensure_member_and_rank(int(roblox_id), **ensure_kwargs)
-            if not roblox_rank_success:
-                # fallback: accept then rank separately
-                await accept_group_join(int(roblox_id))
-                roblox_rank_success = await set_group_rank(int(roblox_id), **ensure_kwargs)
-
-        if roblox_rank_success and not target_role_name:
-            # Attempt to resolve the role name by the rank number if available
-            rank_number = ensure_kwargs.get("rank_number")
-            if rank_number is not None:
-                roles = await fetch_group_ranks()
-                for role in roles:
-                    role_rank = role.get("rank") if role.get("rank") is not None else role.get("rankNumber")
-                    if role_rank == rank_number:
-                        candidate_name = str(role.get("name") or "").strip()
-                        if candidate_name:
-                            target_role_name = candidate_name
-                        break
-
-        if roblox_rank_success and target_role_name:
-            try:
-                async with bot.db_pool.acquire() as conn:
-                    await conn.execute(
-                        "INSERT INTO member_ranks (discord_id, rank, set_by, set_at) VALUES ($1, $2, $3, $4) "
-                        "ON CONFLICT (discord_id) DO UPDATE SET rank = EXCLUDED.rank, set_by = EXCLUDED.set_by, set_at = EXCLUDED.set_at",
-                        member.id,
-                        target_role_name,
-                        bot.user.id if bot.user else None,
-                        utcnow(),
-                    )
-            except Exception as e:
-                print(f"[WARN] Failed to record auto rank for {member.id}: {e}")
-
-            try:
-                matching_role = next(
-                    (role for role in interaction.guild.roles if role.name.lower() == target_role_name.lower()),
-                    None,
-                )
-                if matching_role and matching_role not in member.roles:
-                    await member.add_roles(matching_role, reason="Auto-accepted application rank sync")
-            except Exception as e:
-                print(f"[WARN] Failed to assign Discord rank role to {member.id}: {e}")
-
-    # Sync Discord nickname with Roblox username
-    cleaned_nick = (roblox_name or "").strip()
-    if cleaned_nick:
-        trimmed_nick = cleaned_nick[:32]
-        if member.nick != trimmed_nick:
-            try:
-                await member.edit(nick=trimmed_nick, reason="Auto-accepted application Roblox sync")
-            except discord.Forbidden:
-                print(f"[WARN] Missing permissions to change nickname for {member.id}")
-            except Exception as e:
-                print(f"[WARN] Failed to update nickname for {member.id}: {e}")
-
-    # Assign Discord roles
-    role_ids = [rid for rid in [MEDICAL_STUDENT_ROLE_ID, *APPLICATION_EXTRA_ROLE_IDS] if rid]
-    roles_to_add = [interaction.guild.get_role(rid) for rid in role_ids]
-    roles_to_add = [role for role in roles_to_add if role and role not in member.roles]
-    if roles_to_add:
-        try:
-            await member.add_roles(*roles_to_add, reason="Auto-accepted application")
-        except Exception as e:
-            print(f"Failed to add roles {[r.id for r in roles_to_add]}: {e}")
-
-    # Welcome in comms with standard embed
-    comms = bot.get_channel(COMMS_CHANNEL_ID) if COMMS_CHANNEL_ID else None
-    if comms:
-        try:
-            await comms.send(content=f"🎉 Please welcome {member.mention} to the **Department of Medical Sciences**!", embed=build_welcome_embed())
-        except Exception as e:
-            print(f"Failed to send welcome: {e}")
-
-    # Management channel notification
-    management_channel = bot.get_channel(APPLICATION_MANAGEMENT_CHANNEL_ID)
-    if management_channel:
-        try:
-            roblox_display = roblox_name or "unknown"
-            await management_channel.send(
-                f"✅ Application accepted for {member.mention} (`{roblox_display}`) — roles assigned and onboarding message posted."
-            )
-        except Exception as e:
-            print(f"Failed to send management acceptance notice: {e}")
-
-    # Store decision + cooldown
-    async with bot.db_pool.acquire() as conn:
-        await conn.execute(
-            "INSERT INTO decisions (run_id, decided_by, decision, reason) VALUES ($1,$2,$3,$4)",
-            run_id, "ai", "accept", "Auto-accepted by AI threshold"
-        )
-        await conn.execute(
-            "UPDATE applicants SET status='accepted', cooldown_until = (now() + ($1 * interval '1 hour')), updated_at=now() WHERE discord_id=$2",
-            APPLICATION_COOLDOWN_HOURS, discord_id
-        )
-
-    await log_action("Application Accepted", f"Auto-accepted: <@{discord_id}>")
-    await interaction.followup.send(f"✅ Application accepted for {member.mention}!", ephemeral=True)
-
-async def handle_borderline(interaction, discord_id, answers, score, run_id):
-    """Queue for manual review."""
-    member = find_member(discord_id)
-    management_channel = bot.get_channel(APPLICATION_MANAGEMENT_CHANNEL_ID)
-    await log_action("Application Borderline", f"<@{discord_id}> — Score: {score:.1f}")
-    if management_channel:
-        await management_channel.send(
-            f"🟡 Application borderline — needs manual review.\nUser: {member.mention if member else discord_id}\nScore: **{score:.1f}**"
-        )
-    async with bot.db_pool.acquire() as conn:
-        await conn.execute(
-            "INSERT INTO decisions (run_id, decided_by, decision, reason) VALUES ($1,$2,$3,$4)",
-            run_id, "ai", "borderline", "Below auto-accept threshold but above minimum"
-        )
-        await conn.execute(
-            "UPDATE applicants SET status='submitted', cooldown_until=NULL, updated_at=now() WHERE discord_id=$1",
-            discord_id
-        )
-    await interaction.followup.send("⚠️ Application under manual review.", ephemeral=True)
-
-async def handle_reject(interaction, discord_id, score, rationale, run_id):
-    """Reject application."""
-    member = find_member(discord_id)
-    if member:
-        try:
-            await member.send(
-                f"Hello — thank you for applying to the **Department of Medical Sciences**, but unfortunately your application has not been accepted.\n\n"
-                f"**Score:** {score:.1f}\nReasoning:\n> {rationale[:500]}"
-            )
-        except:
-            pass
-    async with bot.db_pool.acquire() as conn:
-        await conn.execute(
-            "INSERT INTO decisions (run_id, decided_by, decision, reason) VALUES ($1,$2,$3,$4)",
-            run_id, "ai", "reject", rationale[:500]
-        )
-        await conn.execute(
-            "UPDATE applicants SET status='rejected', cooldown_until = (now() + ($1 * interval '1 hour')), updated_at=now() WHERE discord_id=$2",
-            APPLICATION_COOLDOWN_HOURS, discord_id
-        )
-    await log_action("Application Rejected", f"User: <@{discord_id}> | Score: {score:.1f}")
-    await interaction.followup.send("❌ Application rejected.", ephemeral=True)
-
-
-async def send_blacklist_embed(*, discord_id: int, discord_username: str, roblox_username: str, reason: str, blacklisted_by: int):
-    channel = bot.get_channel(APPLICATION_BLACKLIST_LOG_CHANNEL_ID)
-    if not channel:
-        return
-    embed = discord.Embed(
-        title="🚫 Application Blacklist Updated",
-        description="A user has been blacklisted from AI application approval.",
-        color=discord.Color.red(),
-        timestamp=utcnow(),
-    )
-    embed.add_field(name="Discord", value=f"{discord_username} (`{discord_id}`)", inline=False)
-    embed.add_field(name="Roblox Username", value=roblox_username or "Not provided", inline=False)
-    embed.add_field(name="Reason", value=reason[:1024], inline=False)
-    embed.add_field(name="Blacklisted By", value=f"<@{blacklisted_by}> (`{blacklisted_by}`)", inline=False)
-    await channel.send(embed=embed)
-
-# /apply command
-@bot.tree.command(name="apply", description="Begin your Department of Medical Sciences application.")
-async def apply(interaction: discord.Interaction):
-    # Cooldown check
-    async with bot.db_pool.acquire() as conn:
-        cooldown = await conn.fetchval("SELECT cooldown_until FROM applicants WHERE discord_id=$1", interaction.user.id)
-        if cooldown and cooldown > utcnow():
-            remain = human_remaining(cooldown - utcnow())
-            await interaction.response.send_message(
-                f"You must wait **{remain}** before applying again.", ephemeral=True
-            )
-            return
-        # bootstrap row
-        await conn.execute(
-            "INSERT INTO applicants (discord_id, status) VALUES ($1,'in_progress') "
-            "ON CONFLICT (discord_id) DO UPDATE SET status='in_progress', updated_at=now(), last_active=now()",
-            interaction.user.id
-        )
-
-    view = ApplyView(interaction.user.id)
-    await interaction.response.send_message(
-        view._base_message(),
-        view=view,
-        ephemeral=True
-    )
-
-@bot.tree.command(name="blacklist", description="(Mgmt) Block someone from passing AI applications.")
-@app_commands.checks.has_role(MANAGEMENT_ROLE_ID)
-async def blacklist(
-    interaction: discord.Interaction,
-    user: discord.User,
-    roblox_username: str,
-    reason: str,
-):
-    async with bot.db_pool.acquire() as conn:
-        await conn.execute(
-            "INSERT INTO application_blacklist (discord_id, discord_username, roblox_username, reason, blacklisted_by, blacklisted_at) "
-            "VALUES ($1,$2,$3,$4,$5,now()) "
-            "ON CONFLICT (discord_id) DO UPDATE SET discord_username=EXCLUDED.discord_username, roblox_username=EXCLUDED.roblox_username, reason=EXCLUDED.reason, blacklisted_by=EXCLUDED.blacklisted_by, blacklisted_at=EXCLUDED.blacklisted_at",
-            user.id,
-            str(user),
-            roblox_username.strip(),
-            reason.strip(),
-            interaction.user.id,
-        )
-    await send_blacklist_embed(
-        discord_id=user.id,
-        discord_username=str(user),
-        roblox_username=roblox_username.strip(),
-        reason=reason.strip(),
-        blacklisted_by=interaction.user.id,
-    )
-    await interaction.response.send_message(f"✅ {user.mention} has been blacklisted from AI app approvals.", ephemeral=True)
-
-
-@bot.tree.command(name="unblacklist", description="(Mgmt) Remove someone from the AI application blacklist.")
-@app_commands.checks.has_role(MANAGEMENT_ROLE_ID)
-async def unblacklist(interaction: discord.Interaction, user: discord.User):
-    async with bot.db_pool.acquire() as conn:
-        deleted = await conn.execute("DELETE FROM application_blacklist WHERE discord_id=$1", user.id)
-    if deleted.endswith("0"):
-        await interaction.response.send_message("That user is not blacklisted.", ephemeral=True)
-        return
-    await interaction.response.send_message(f"✅ Removed {user.mention} from blacklist.", ephemeral=True)
-
-
-@bot.tree.command(name="blacklists", description="(Mgmt) View all AI application blacklists.")
-@app_commands.checks.has_role(MANAGEMENT_ROLE_ID)
-async def blacklists(interaction: discord.Interaction):
-    async with bot.db_pool.acquire() as conn:
-        rows = await conn.fetch(
-            "SELECT discord_id, discord_username, roblox_username, reason, blacklisted_by, blacklisted_at "
-            "FROM application_blacklist ORDER BY blacklisted_at DESC"
-        )
-    if not rows:
-        await interaction.response.send_message("No users are currently blacklisted.", ephemeral=True)
-        return
-    lines = []
-    for row in rows:
-        lines.append(
-            f"• **{row['discord_username'] or row['discord_id']}** (`{row['discord_id']}`) | "
-            f"Roblox: `{row['roblox_username'] or 'N/A'}` | By: <@{row['blacklisted_by']}>\n"
-            f"  Reason: {row['reason']}"
-        )
-    await interaction.response.send_message("\n".join(lines)[:1900], ephemeral=True)
+# Application commands have been removed; onboarding is handled outside Dr. Rae.
 
 # === PART 2/3 END ===
 # Reply "next" to receive PART 3/3 — remaining commands (tasks/orientation/strikes/excuses), loops, /rank, and bot.run().
@@ -2439,6 +1569,26 @@ async def is_valid_task_type(task_type: str) -> bool:
     return any(t.casefold() == normalized for t in task_types)
 
 
+def is_test_task_type(task_type: str | None) -> bool:
+    """Return whether a task type counts toward the weekly test requirement."""
+    return "test" in _normalize_label(task_type)
+
+
+def quota_status(test_count: int, misc_count: int, time_minutes: int) -> tuple[bool, str]:
+    """Evaluate the active weekly quota and return a short progress string."""
+    met = (
+        time_minutes >= WEEKLY_TIME_REQUIREMENT
+        and test_count >= WEEKLY_TEST_REQUIREMENT
+        and misc_count >= WEEKLY_MISC_REQUIREMENT
+    )
+    progress = (
+        f"{time_minutes}/{WEEKLY_TIME_REQUIREMENT} mins on-site, "
+        f"{test_count}/{WEEKLY_TEST_REQUIREMENT} test, "
+        f"{misc_count}/{WEEKLY_MISC_REQUIREMENT} miscellaneous tasks"
+    )
+    return met, progress
+
+
 class LogTaskForm(discord.ui.Modal, title='Add Comments (optional)'):
     def __init__(self, proof: discord.Attachment, task_type: str):
         super().__init__()
@@ -2509,12 +1659,20 @@ async def tasks_log(interaction: discord.Interaction, task_type: str, proof: dis
 async def tasks_my(interaction: discord.Interaction):
     member_id = interaction.user.id
     async with bot.db_pool.acquire() as conn:
-        tasks_completed    = await conn.fetchval("SELECT COUNT(*) FROM weekly_task_logs WHERE member_id = $1", member_id) or 0
+        weekly_rows = await conn.fetch(
+            "SELECT COALESCE(NULLIF(task_type, ''), task) AS ttype "
+            "FROM weekly_task_logs WHERE member_id = $1",
+            member_id,
+        )
         time_spent_seconds = await conn.fetchval("SELECT time_spent FROM roblox_time WHERE member_id = $1", member_id) or 0
         active_strikes     = await conn.fetchval("SELECT COUNT(*) FROM strikes WHERE member_id=$1 AND expires_at > $2", member_id, utcnow())
     time_spent_minutes = time_spent_seconds // 60
+    test_count = sum(1 for row in weekly_rows if is_test_task_type(row["ttype"]))
+    misc_count = len(weekly_rows) - test_count
+    met_quota, progress = quota_status(test_count, misc_count, time_spent_minutes)
+    status = "✅ Met" if met_quota else "❌ Below"
     await interaction.response.send_message(
-        f"You have **{tasks_completed}/{WEEKLY_REQUIREMENT}** tasks and **{time_spent_minutes}/{WEEKLY_TIME_REQUIREMENT}** mins. "
+        f"Weekly quota: **{status}** — {progress}. "
         f"Active strikes: **{active_strikes}/3**.",
         ephemeral=True
     )
@@ -3213,6 +2371,8 @@ async def check_weekly_tasks():
     }
     robux_map: dict[int, int] = {}
     task_breakdown_map: dict[int, list[tuple[str, int]]] = {}
+    test_count_map: dict[int, int] = {}
+    misc_count_map: dict[int, int] = {}
     for row in payout_rows:
         member_id = row['member_id']
         if member_id not in dept_member_ids:
@@ -3220,6 +2380,10 @@ async def check_weekly_tasks():
         task_type = row['ttype'] or "Uncategorized"
         count = int(row['cnt'] or 0)
         task_breakdown_map.setdefault(member_id, []).append((task_type, count))
+        if is_test_task_type(task_type):
+            test_count_map[member_id] = test_count_map.get(member_id, 0) + count
+        else:
+            misc_count_map[member_id] = misc_count_map.get(member_id, 0) + count
         payout = payout_lookup.get(task_type.casefold(), 0)
         if payout:
             robux_map[member_id] = robux_map.get(member_id, 0) + (payout * count)
@@ -3236,16 +2400,20 @@ async def check_weekly_tasks():
         time_done_minutes = (time_map.get(member_id, 0)) // 60
         robux_total = robux_map.get(member_id, 0)
         task_breakdown = task_breakdown_map.get(member_id, [])
-        if tasks_done >= WEEKLY_REQUIREMENT and time_done_minutes >= WEEKLY_TIME_REQUIREMENT:
-            met.append((member, tasks_done, time_done_minutes, robux_total, task_breakdown))
+        test_count = test_count_map.get(member_id, 0)
+        misc_count = misc_count_map.get(member_id, 0)
+        quota_met, progress = quota_status(test_count, misc_count, time_done_minutes)
+        if quota_met:
+            met.append((member, tasks_done, time_done_minutes, robux_total, task_breakdown, progress))
         else:
-            not_met.append((member, tasks_done, time_done_minutes, robux_total, task_breakdown))
+            not_met.append((member, tasks_done, time_done_minutes, robux_total, task_breakdown, progress))
 
     zero_ids = dept_member_ids - considered_ids
     for mid in zero_ids:
         member = guild.get_member(mid)
         if member:
-            zero.append((member, robux_map.get(mid, 0)))
+            _, progress = quota_status(0, 0, 0)
+            zero.append((member, robux_map.get(mid, 0), progress))
 
     # Post report
     def fmt_breakdown(task_breakdown: list[tuple[str, int]]) -> str:
@@ -3255,18 +2423,18 @@ async def check_weekly_tasks():
 
     def fmt_met(lst):
         return "\n".join(
-            f"• {m.mention} | {robux}R$ — {t}/{WEEKLY_REQUIREMENT} tasks ({fmt_breakdown(breakdown)}), {mins}/{WEEKLY_TIME_REQUIREMENT} mins"
-            for m, t, mins, robux, breakdown in lst
+            f"• {m.mention} | {robux}R$ — {progress} ({fmt_breakdown(breakdown)})"
+            for m, t, mins, robux, breakdown, progress in lst
         ) if lst else "—"
 
     def fmt_not_met(lst):
         return "\n".join(
-            f"• {m.mention} | {robux}R$ — {t}/{WEEKLY_REQUIREMENT} tasks ({fmt_breakdown(breakdown)}), {mins}/{WEEKLY_TIME_REQUIREMENT} mins"
-            for m, t, mins, robux, breakdown in lst
+            f"• {m.mention} | {robux}R$ — {progress} ({fmt_breakdown(breakdown)})"
+            for m, t, mins, robux, breakdown, progress in lst
         ) if lst else "—"
 
     def fmt_zero(lst):
-        return "\n".join(f"• {m.mention} | {robux}R$" for m, robux in lst) if lst else "—"
+        return "\n".join(f"• {m.mention} | {robux}R$ — {progress}" for m, robux, progress in lst) if lst else "—"
 
     summary = (
         f"--- Weekly Task Report (**{wk}**) ---\n"
@@ -3285,6 +2453,15 @@ async def check_weekly_tasks():
         color=discord.Color.from_str("#5aa9ff"),
         footer_text=None
     )
+
+    for member, _tasks, _mins, _robux, _breakdown, progress in not_met:
+        active_after = await issue_strike(member, f"Failed weekly quota ({progress})", set_by=None, auto=True)
+        if active_after >= 3:
+            await enforce_three_strikes(member)
+    for member, _robux, progress in zero:
+        active_after = await issue_strike(member, f"Failed weekly quota ({progress})", set_by=None, auto=True)
+        if active_after >= 3:
+            await enforce_three_strikes(member)
 
     # Reset weekly tables
     async with bot.db_pool.acquire() as conn:
