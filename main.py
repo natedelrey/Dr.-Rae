@@ -2268,30 +2268,10 @@ async def issue_strike(member: discord.Member, reason: str, *, set_by: int | Non
     await log_action("Strike Issued", f"Member: {member.mention}\nReason: {reason}\nAuto: {auto}\nActive now: **{active}/3**")
     return active
 
-async def enforce_three_strikes(member: discord.Member):
-    try:
-        await member.send("You've been automatically removed from the Department of Medical Sciences for reaching **3/3 strikes**.")
-    except:
-        pass
-
-    roblox_removed = await try_remove_from_roblox(member.id)
-
-    kicked = False
-    try:
-        await member.kick(reason="Reached 3/3 strikes — automatic removal.")
-        kicked = True
-    except Exception as e:
-        print(f"Kick failed for {member.id}: {e}")
-
-    await log_action("Three-Strike Removal",
-                     f"Member: {member.mention}\nRoblox removal: {'✅' if roblox_removed else '❌/N/A'}\nDiscord kick: {'✅' if kicked else '❌'}")
-
 @strikes_group.command(name="add", description="(Mgmt) Add a strike to a member.")
 @app_commands.checks.has_role(MANAGEMENT_ROLE_ID)
 async def strikes_add(interaction: discord.Interaction, member: discord.Member, reason: str):
     active_after = await issue_strike(member, reason, set_by=interaction.user.id, auto=False)
-    if active_after >= 3:
-        await enforce_three_strikes(member)
     await interaction.response.send_message(f"Strike added to {member.mention}. Active strikes: **{active_after}/3**.", ephemeral=True)
 
 @strikes_group.command(name="remove", description="(Mgmt) Remove N active strikes from a member (earliest expiring first).")
@@ -2455,13 +2435,9 @@ async def check_weekly_tasks():
     )
 
     for member, _tasks, _mins, _robux, _breakdown, progress in not_met:
-        active_after = await issue_strike(member, f"Failed weekly quota ({progress})", set_by=None, auto=True)
-        if active_after >= 3:
-            await enforce_three_strikes(member)
+        await issue_strike(member, f"Failed weekly quota ({progress})", set_by=None, auto=True)
     for member, _robux, progress in zero:
-        active_after = await issue_strike(member, f"Failed weekly quota ({progress})", set_by=None, auto=True)
-        if active_after >= 3:
-            await enforce_three_strikes(member)
+        await issue_strike(member, f"Failed weekly quota ({progress})", set_by=None, auto=True)
 
     # Reset weekly tables
     async with bot.db_pool.acquire() as conn:
