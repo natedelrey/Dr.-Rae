@@ -923,6 +923,18 @@ class MD_BOT(commands.Bot):
                         updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
                     );
                 ''')
+                await connection.execute('''
+                    CREATE TABLE IF NOT EXISTS bot_settings (
+                        setting_key TEXT PRIMARY KEY,
+                        setting_value BOOLEAN NOT NULL,
+                        updated_by BIGINT,
+                        updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+                    );
+                ''')
+                await connection.execute(
+                    "INSERT INTO bot_settings (setting_key, setting_value) VALUES ('quota_paused', FALSE) "
+                    "ON CONFLICT (setting_key) DO NOTHING"
+                )
 
 
             print("[DB] Tables ready.")
@@ -1531,6 +1543,21 @@ async def get_task_type_robux_map(enabled_only: bool = False) -> dict[str, int]:
     return {(r["task_type"] or "").casefold(): int(r["robux_value"] or 0) for r in rows}
 
 
+async def is_quota_paused(conn: asyncpg.Connection | None = None) -> bool:
+    """Return the persistent weekly quota pause state."""
+    if not bot.db_pool:
+        return False
+
+    if conn is not None:
+        value = await conn.fetchval(
+            "SELECT setting_value FROM bot_settings WHERE setting_key = 'quota_paused'"
+        )
+        return bool(value)
+
+    async with bot.db_pool.acquire() as acquired_conn:
+        return await is_quota_paused(acquired_conn)
+
+
 async def sync_weekly_task_counter(conn: asyncpg.Connection, member_id: int) -> int:
     """Keep the legacy weekly_tasks counter aligned with weekly_task_logs."""
     count = await conn.fetchval(
@@ -1670,11 +1697,48 @@ async def tasks_my(interaction: discord.Interaction):
     test_count = sum(1 for row in weekly_rows if is_test_task_type(row["ttype"]))
     misc_count = len(weekly_rows) - test_count
     met_quota, progress = quota_status(test_count, misc_count, time_spent_minutes)
-    status = "✅ Met" if met_quota else "❌ Below"
+    paused = await is_quota_paused()
+    status = "⏸️ Paused" if paused else ("✅ Met" if met_quota else "❌ Below")
     await interaction.response.send_message(
         f"Weekly quota: **{status}** — {progress}. "
         f"Active strikes: **{active_strikes}/3**.",
         ephemeral=True
+    )
+
+
+@tasks_group.command(name="quota_pause", description="(Mgmt) Pause the weekly quota, or re-enable it if paused.")
+@app_commands.checks.has_role(MANAGEMENT_ROLE_ID)
+async def tasks_quota_pause(interaction: discord.Interaction):
+    async with bot.db_pool.acquire() as conn:
+        async with conn.transaction():
+            current = await conn.fetchval(
+                "SELECT setting_value FROM bot_settings "
+                "WHERE setting_key = 'quota_paused' FOR UPDATE"
+            )
+            paused = not bool(current)
+            await conn.execute(
+                "INSERT INTO bot_settings (setting_key, setting_value, updated_by, updated_at) "
+                "VALUES ('quota_paused', $1, $2, $3) "
+                "ON CONFLICT (setting_key) DO UPDATE SET "
+                "setting_value = EXCLUDED.setting_value, updated_by = EXCLUDED.updated_by, "
+                "updated_at = EXCLUDED.updated_at",
+                paused, interaction.user.id, utcnow(),
+            )
+
+    state = "paused" if paused else "re-enabled"
+    detail = (
+        "The automatic weekly report, strikes, and reset will be skipped while it is paused. "
+        "Task and time progress will continue to be recorded."
+        if paused
+        else "The automatic weekly report, quota enforcement, and reset are active again."
+    )
+    await log_action(
+        f"Weekly Quota {state.title()}",
+        f"By: {interaction.user.mention}\nState: **{state}**",
+    )
+    await interaction.response.send_message(
+        f"Weekly quota has been **{state}**. {detail}",
+        ephemeral=True,
     )
 
 @tasks_group.command(name="member", description="Show a member's task totals by type (all-time).")
@@ -2312,6 +2376,10 @@ async def strikes_view(interaction: discord.Interaction, member: discord.Member 
 async def check_weekly_tasks():
     # Only fire on Sunday UTC
     if utcnow().weekday() != 6:
+        return
+
+    if await is_quota_paused():
+        print("Weekly quota check skipped: quota is paused.")
         return
 
     wk = week_key()
